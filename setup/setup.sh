@@ -199,6 +199,7 @@ install_singbox_core_and_config() {
     # 4. 下载核心
     echo -e "${YELLOW}正在下载 Sing-box 核心 ($SINGBOX_ARCH)...${NC}"
     mkdir -p $INSTALL_DIR
+    rm -f "$SINGBOX_CORE_PATH" # Prevent Text file busy
     curl -L -o "$SINGBOX_CORE_PATH" "$SINGBOX_DOWNLOAD_URL"
     chmod +x $SINGBOX_CORE_PATH
     echo -e "${GREEN}Sing-box 核心安装成功!${NC}"
@@ -206,9 +207,17 @@ install_singbox_core_and_config() {
 
     # 5. 下载配置
     mkdir -p $CONFIG_DIR
-    CONFIG_JSON_URL="https://ghfast.top/raw.githubusercontent.com/Scu9277/eBPF/refs/heads/main/sing-box/config.json"
+    CONFIG_JSON_URL="https://ghfast.top/raw.githubusercontent.com/Scu9277/TProxy/refs/heads/main/sing-box/config.json"
     echo -e "${YELLOW}正在下载 Sing-box 配置文件...${NC}"
     curl -L -o "$CONFIG_DIR/config.json" "$CONFIG_JSON_URL"
+    
+    # Check if download was successful (JSON check)
+    if [ $(stat -c%s "$CONFIG_DIR/config.json") -lt 100 ]; then
+         echo -e "${RED}❌ 配置文件下载异常 (文件过小)，可能是 URL 错误或 404！${NC}"
+         echo -e "URL: $CONFIG_JSON_URL"
+         cat "$CONFIG_DIR/config.json"
+         exit 1
+    fi
     echo -e "${GREEN}config.json 下载成功！${NC}"
     
     # 6. 创建并启动 Systemd 服务
