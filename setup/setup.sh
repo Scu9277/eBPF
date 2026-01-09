@@ -206,7 +206,7 @@ install_singbox_core_and_config() {
 
     # 5. 下载配置
     mkdir -p $CONFIG_DIR
-    CONFIG_JSON_URL="https://ghfast.top/raw.githubusercontent.com/Scu9277/TProxy/refs/heads/main/sing-box/config.json"
+    CONFIG_JSON_URL="https://ghfast.top/raw.githubusercontent.com/Scu9277/eBPF/refs/heads/main/sing-box/config.json"
     echo -e "${YELLOW}正在下载 Sing-box 配置文件...${NC}"
     curl -L -o "$CONFIG_DIR/config.json" "$CONFIG_JSON_URL"
     echo -e "${GREEN}config.json 下载成功！${NC}"
@@ -236,7 +236,10 @@ EOF
     if systemctl is-active --quiet sing-box; then
         echo -e "${GREEN}✅ Sing-box 服务已成功启动！${NC}"
     else
-        echo -e "${RED}❌ Sing-box 服务启动失败！${NC}"; exit 1
+        echo -e "${RED}❌ Sing-box 服务启动失败！${NC}"
+        echo -e "${YELLOW}显示最后 20 行日志用于调试:${NC}"
+        journalctl -u sing-box -n 20 --no-pager
+        exit 1
     fi
     echo "----------------------------------------------------------------"
     echo -e "🎉 ${GREEN}Sing-box 核心安装并配置完毕！${NC}"
@@ -376,7 +379,7 @@ install_substore() {
     if ! docker images -q $IMAGE_NAME | grep -q . ; then
         echo -e "${YELLOW}🔎 未找到 '$IMAGE_NAME' 镜像，正在下载...${NC}"
         echo -e "📦 正在下载 Sub-Store Docker 镜像包..."
-        wget "https://ghfast.top/github.com/Scu9277/TProxy/releases/download/1.0/sub-store.tar.gz" -O "/root/sub-store.tar.gz"
+        wget "https://ghfast.top/github.com/Scu9277/eBPF/releases/download/1.0/sub-store.tar.gz" -O "/root/sub-store.tar.gz"
         echo -e "🗜️ 正在解压并加载镜像..."
         tar -xzf "/root/sub-store.tar.gz" -C "/root/"
         docker load -i "/root/sub-store.tar"
@@ -417,7 +420,7 @@ install_tproxy() {
     case $t_choice in
         1)
             echo -e "🔧 准备执行 TProxy 脚本 (setup-tproxy-ipv4.sh)..."
-            TPROXY_SCRIPT_URL="https://ghfast.top/raw.githubusercontent.com/Scu9277/TProxy/refs/heads/main/Tproxy/setup-tproxy-ipv4.sh"
+            TPROXY_SCRIPT_URL="https://ghfast.top/raw.githubusercontent.com/Scu9277/eBPF/refs/heads/main/Tproxy/setup-tproxy-ipv4.sh"
             if bash <(curl -sSL "$TPROXY_SCRIPT_URL"); then
                 echo -e "${GREEN}✅ TProxy 脚本执行完毕！${NC}"
             else
@@ -447,7 +450,7 @@ install_renetwork() {
     echo -e "${BLUE}--- 正在执行 [组件 6: 配置网卡IP] ---${NC}"
     echo -e "🚀 正在下载并执行 renetwork.sh 脚本..."
     
-    if bash <(curl -sSL https://ghfast.top/raw.githubusercontent.com/Scu9277/TProxy/refs/heads/main/renetwork.sh); then
+    if bash <(curl -sSL https://ghfast.top/raw.githubusercontent.com/Scu9277/eBPF/refs/heads/main/renetwork.sh); then
         echo -e "${GREEN}✅ 网卡配置脚本执行完毕。${NC}"
     else
         echo -e "${RED}❌ 网卡配置脚本执行失败。${NC}"
