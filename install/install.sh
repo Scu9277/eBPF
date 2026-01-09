@@ -12,7 +12,7 @@ set -e
 # Set to 'true' to force using the proxy, 'false' to force direct connection, 
 # or 'auto' to detect based on timezone/locale (simple heuristic).
 USE_CN_PROXY="auto" 
-CN_PROXY_URL="https://ghfast.tproxy"
+CN_PROXY_URL="https://ghfast.top"
 BINARY_URL="https://github.com/Scu9277/eBPF/releases/download/0.1/tproxy-agent"
 SERVICE_URL="https://github.com/Scu9277/eBPF/releases/download/0.1/tproxy-agent.service"
 INSTALL_DIR="/etc/eBPF"
