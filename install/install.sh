@@ -1,151 +1,747 @@
 #!/bin/bash
+
+#=================================================================================
+#   Mihomo / Sing-box 模块化安装脚本 (V13)
+#
+#   作者: shangkouyou Duang Scu
+#   微信: shangkouyou
+#   邮箱: shangkouyou@gmail.com
+#
+#   V13 版: (Bug 修复)
+#   1. 移除了 V12 中 main_menu 函数里多余的 "S" 字符。
+#=================================================================================
+
+# --- 脚本配置 (Mihomo 专用) ---
+CONFIG_ZIP_URL="https://shangkouyou.lanzouo.com/iAb3u39mthef"
+PLACEHOLDER_IP="10.0.0.121"
+
+# --- 脚本配置 (Sing-box 专用) ---
+SINGBOX_AMD64_URL="https://ghfast.top/github.com/Scu9277/eBPF/releases/download/sing-box/sing-box-1.13.0-beta.1-reF1nd-linux-amd64"
+SINGBOX_AMD64V3_URL="https://ghfast.top/github.com/Scu9277/eBPF/releases/download/sing-box/sing-box-1.13.0-beta.1-reF1nd-linux-amd64v3"
+SINGBOX_ARM64_URL="https://ghfast.top/github.com/Scu9277/eBPF/releases/download/sing-box/sing-box-1.13.0-beta.1-reF1nd-linux-arm64"
+
+
+# --- 脚本设置 ---
+GREEN="\033[32m"
+RED="\033[31m"
+YELLOW="\033[33m"
+BLUE="\033[34m"
+MAGENTA="\033[35m"
+CYAN="\033[36m"
+NC="\033[0m"
 set -e
+LAN_IP=""
+MIHOMO_ARCH=""
+SINGBOX_ARCH=""
 
-# ==========================================
-# eBPF TProxy Agent Installer
-# Author: shangkouyou Duang Scu
-# WeChat: shangkouyou
-# Email:  shangkouyou@gmail.com
-# ==========================================
+#=================================================================================
+#   SECTION 1: 核心安装程序 (Core Installers)
+#=================================================================================
+# (此区域函数与 V12 完全相同，未作修改)
 
-# Configuration
-# Set to 'true' to force using the proxy, 'false' to force direct connection, 
-# or 'auto' to detect based on timezone/locale (simple heuristic).
-USE_CN_PROXY="auto" 
-CN_PROXY_URL="https://ghfast.top"
-BINARY_URL="https://github.com/Scu9277/eBPF/releases/download/0.1/tproxy-agent"
-SERVICE_URL="https://github.com/Scu9277/eBPF/releases/download/0.1/tproxy-agent.service"
-INSTALL_DIR="/etc/eBPF"
-
-# Colors
-GREEN='\033[0;32m'
-RED='\033[0;31m'
-NC='\033[0m'
-CYAN='\033[0;36m'
-YELLOW='\033[1;33m'
-
-log_info() {
-    echo -e "${GREEN}[INFO] $1${NC}"
-}
-
-log_warn() {
-    echo -e "${YELLOW}[WARN] $1${NC}"
-}
-
-log_error() {
-    echo -e "${RED}[ERROR] $1${NC}"
-}
-
-print_header() {
-    echo -e "${CYAN}"
-    echo "============================================================"
-    echo "        eBPF TProxy Agent Installer                         "
-    echo "        Author:  shangkouyou Duang Scu                      "
-    echo "        WeChat:  shangkouyou                                "
-    echo "        Email:   shangkouyou@gmail.com                      "
-    echo "============================================================"
-    echo -e "${NC}"
-}
-
-# Check Root
-if [ "$EUID" -ne 0 ]; then
-  log_error "Please run as root"
-  exit 1
-fi
-
-print_header
-
-# Region Detection Logic
-if [ "$USE_CN_PROXY" = "auto" ]; then
-    log_info "Detecting network region..."
-    if curl -s --connect-timeout 3 https://github.com > /dev/null; then
-        USE_CN_PROXY="false"
-        log_info "GitHub is accessible. Using direct connection."
-    else
-        USE_CN_PROXY="true"
-        log_info "GitHub seems slow or inaccessible. Switching to CN Proxy."
+# ----------------------------------------------------------------
+#   核心 1: Mihomo 核心 (安装、配置、启动)
+# ----------------------------------------------------------------
+install_mihomo_core_and_config() {
+    echo -e "${BLUE}--- 正在安装 [核心 1: Mihomo] ---${NC}"
+    # 1. 检查配置 URL
+    if [ -z "$CONFIG_ZIP_URL" ]; then
+        echo -e "${RED}🛑 错误：Mihomo 的 'CONFIG_ZIP_URL' 未在脚本顶部配置！${NC}"
+        exit 1
     fi
-fi
 
-if [ "$USE_CN_PROXY" = "true" ]; then
-    # Prepend Proxy URL
-    BINARY_URL="${CN_PROXY_URL}/${BINARY_URL}"
-    SERVICE_URL="${CN_PROXY_URL}/${SERVICE_URL}"
-    log_info "Using Mirror: $CN_PROXY_URL"
-fi
+    # 2. 检查架构
+    echo -e "🕵️  正在检测 Mihomo 所需架构..."
+    ARCH=$(uname -m)
+    case $ARCH in
+        x86_64) MIHOMO_ARCH="amd64-v2" ;;
+        aarch64) MIHOMO_ARCH="arm64-v8" ;;
+        armv7l) MIHOMO_ARCH="armv7" ;;
+        *) echo -e "${RED}❌ 不支持的架构: $ARCH！${NC}"; exit 1 ;;
+    esac
+    echo -e "${GREEN}✅ Mihomo 架构: $MIHOMO_ARCH${NC}"
 
-# 1. Install Dependencies
-log_info "Step 1/7: Installing dependencies..."
-if command -v apt-get >/dev/null; then
-    apt-get update -y
-    apt-get install -y wget curl ca-certificates procps iproute2
-elif command -v yum >/dev/null; then
-    yum install -y wget curl ca-certificates procps iproute
-else
-    log_warn "Package manager not found. Assuming dependencies are installed."
-fi
+    # 3. 安装 Mihomo (如果未安装)
+    if command -v mihomo &> /dev/null; then
+        echo -e "${GREEN}👍 Mihomo 已经安装，跳过下载。${NC}"
+        mihomo -v
+    else
+        echo -e "📡 正在获取 Mihomo 最新版本号..."
+        API_URL="https://api.github.com/repos/MetaCubeX/mihomo/releases/latest"
+        LATEST_TAG=$(curl -sL $API_URL | jq -r .tag_name)
+        if [ -z "$LATEST_TAG" ] || [ "$LATEST_TAG" == "null" ]; then
+            echo -e "${RED}❌ 获取 Mihomo 最新版本号失败！${NC}"; exit 1
+        fi
+        echo -e "${GREEN}🎉 找到最新版本: $LATEST_TAG${NC}"
+        DEB_FILENAME="mihomo-linux-${MIHOMO_ARCH}-${LATEST_TAG}.deb"
+        DOWNLOAD_URL="https://github.com/MetaCubeX/mihomo/releases/download/${LATEST_TAG}/${DEB_FILENAME}"
+        FAST_DOWNLOAD_URL="https://ghfast.top/${DOWNLOAD_URL}"
+        DEB_PATH="/root/${DEB_FILENAME}"
+        echo -e "🚀 正在下载: $FAST_DOWNLOAD_URL"
+        wget -O "$DEB_PATH" "$FAST_DOWNLOAD_URL"
+        dpkg -i "$DEB_PATH"
+        rm -f "$DEB_PATH"
+        mihomo -v
+        echo -e "${GREEN}✅ Mihomo 安装成功！${NC}"
+    fi
 
-# 2. Enable IP Forwarding (Permanent)
-log_info "Step 2/7: Enabling IP Forwarding..."
-if ! grep -q "net.ipv4.ip_forward=1" /etc/sysctl.conf; then
-    echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
-else
-    # Ensure it's not commented out
-    sed -i 's/^#net.ipv4.ip_forward=1/net.ipv4.ip_forward=1/' /etc/sysctl.conf
-fi
-# Apply immediately
-sysctl -p >/dev/null 2>&1 || true
-# Double check dynamic
-sysctl -w net.ipv4.ip_forward=1 >/dev/null
+    # 4. 下载并配置 (带覆盖检查)
+    if [ -f "/etc/mihomo/config.yaml" ]; then
+        read -p "$(echo -e ${YELLOW}"⚠️  检测到已存在的 Mihomo 配置文件，是否覆盖? (y/N): "${NC})" choice
+        case "$choice" in
+          y|Y ) echo "🔄 好的，将继续下载并覆盖配置..." ;;
+          * ) echo -e "${GREEN}👍 保留现有配置，跳过下载。${NC}"; return ;;
+        esac
+    fi
+    echo -e "📂 正在配置您的 mihomo 配置文件..."
+    API_RESOLVE_URL="https://api.zxki.cn/api/lzy?url=${CONFIG_ZIP_URL}"
+    REAL_DOWN_URL=$(curl -sL "$API_RESOLVE_URL" | jq -r .downUrl)
+    if [ -z "$REAL_DOWN_URL" ] || [ "$REAL_DOWN_URL" == "null" ]; then
+        echo -e "${RED}❌ 错误：无法从 API 解析到下载地址！${NC}"; exit 1
+    fi
+    CONFIG_ZIP_PATH="/root/mihomo_config.zip"
+    TEMP_DIR="/root/mihomo_temp_unzip"
+    wget -O "$CONFIG_ZIP_PATH" "$REAL_DOWN_URL"
+    rm -rf "$TEMP_DIR"
+    mkdir -p "$TEMP_DIR"
+    unzip -o "$CONFIG_ZIP_PATH" -d "$TEMP_DIR"
+    if [ -d "$TEMP_DIR/mihomo" ]; then
+        rm -rf /etc/mihomo
+        mv "$TEMP_DIR/mihomo" /etc/
+    elif [ -f "$TEMP_DIR/config.yaml" ]; then
+        mkdir -p /etc/mihomo
+        mv "$TEMP_DIR"/* /etc/mihomo/
+    else
+        echo -e "${RED}❌ 错误：无法识别的 ZIP 压缩包结构！${NC}"; exit 1
+    fi
+    rm -f "$CONFIG_ZIP_PATH"
+    rm -rf "$TEMP_DIR"
+    echo -e "${GREEN}✅ 配置文件部署成功！${NC}"
 
-# 3. Create Install Directory
-log_info "Step 3/7: Creating directory: $INSTALL_DIR"
-mkdir -p "$INSTALL_DIR"
+    # 5. 配置 DNS 劫持 (替换 IP)
+    echo -e "📡 正在获取本机局域网 IP (用于 DNS 劫持)..."
+    LAN_IP=$(hostname -I | awk '{print $1}')
+    if [ -z "$LAN_IP" ]; then
+        echo -e "${RED}❌ 未能自动获取局域网 IP！${NC}"; exit 1
+    fi
+    echo -e "${GREEN}✅ 本机 IP: $LAN_IP${NC}"
+    CONFIG_FILE="/etc/mihomo/config.yaml"
+    if grep -q "$PLACEHOLDER_IP" "$CONFIG_FILE"; then
+        echo -e "🔍 发现占位符 ${PLACEHOLDER_IP}，正在替换为 ${GREEN}${LAN_IP}${NC}..."
+        sed -i "s/${PLACEHOLDER_IP}/${LAN_IP}/g" "$CONFIG_FILE"
+        echo -e "${GREEN}✅ 占位符 IP 替换成功！${NC}"
+    else
+        echo -e "${GREEN}👍 未在 $CONFIG_FILE 中检测到占位符，假定已配置。${NC}"
+    fi
 
-# 4. Download Binary
-log_info "Step 4/7: Downloading binary..."
-log_info "Src: $BINARY_URL"
-curl -L -o "$INSTALL_DIR/tproxy-agent" "$BINARY_URL"
-chmod +x "$INSTALL_DIR/tproxy-agent"
+    # 6. 启动 Mihomo 服务
+    echo -e "🚀 正在启动并设置 mihomo 服务为开机自启..."
+    systemctl enable mihomo
+    systemctl restart mihomo
+    sleep 3
+    if systemctl is-active --quiet mihomo; then
+        echo -e "${GREEN}✅ Mihomo 服务正在愉快地运行！${NC}"
+    else
+        echo -e "${RED}❌ Mihomo 服务启动失败！${NC}"; exit 1
+    fi
+    echo "----------------------------------------------------------------"
+    echo -e "🎉 ${GREEN}Mihomo 核心安装并配置完毕！${NC}"
+    echo -e "Mihomo UI: ${YELLOW}http://${LAN_IP}:9090/ui${NC} (或 http://scu.lan/ui 如果已配置DNS)"
+    echo "----------------------------------------------------------------"
+}
 
-# 5. Download Service
-log_info "Step 5/7: Downloading service file..."
-curl -L -o "/etc/systemd/system/tproxy-agent.service" "$SERVICE_URL"
+# ----------------------------------------------------------------
+#   核心 2: Sing-box 核心 (安装、配置、启动)
+# ----------------------------------------------------------------
+install_singbox_core_and_config() {
+    echo -e "${BLUE}--- 正在安装 [核心 2: Sing-box] ---${NC}"
 
-# 6. Fix Service Path
-log_info "Step 6/7: Configuring Service Path..."
-sed -i "s|ExecStart=.*|ExecStart=$INSTALL_DIR/tproxy-agent|" /etc/systemd/system/tproxy-agent.service
+    # 1. 检测架构
+    echo -e "${YELLOW}正在检测 Sing-box 所需架构...${NC}"
+    ARCH_RAW=$(uname -m)
+    if [ "$ARCH_RAW" == "x86_64" ] || [ "$ARCH_RAW" == "amd64" ]; then
+        if command -v grep > /dev/null && [ -f /proc/cpuinfo ] && grep -q avx2 /proc/cpuinfo; then
+            SINGBOX_ARCH="amd64v3"
+        else
+            SINGBOX_ARCH="amd64"
+        fi
+    elif [ "$ARCH_RAW" == "aarch64" ] || [ "$ARCH_RAW" == "arm64" ]; then
+        SINGBOX_ARCH="arm64"
+    else
+        echo -e "${RED}错误：不支持的系统架构 $ARCH_RAW。${NC}"; exit 1
+    fi
+    echo -e "${GREEN}检测到架构: $SINGBOX_ARCH${NC}"
 
-# 7. Start Service
-log_info "Step 7/7: Starting Service..."
-systemctl daemon-reload
-systemctl enable tproxy-agent
-systemctl restart tproxy-agent
+    # 2. 定义路径和 URL
+    INSTALL_DIR="/usr/local/bin"
+    CONFIG_DIR="/etc/sing-box"
+    SINGBOX_CORE_PATH="$INSTALL_DIR/sing-box"
+    
+    # 从顶部配置获取 URL
+    SINGBOX_DOWNLOAD_URL=""
+    case "$SINGBOX_ARCH" in
+        amd64) SINGBOX_DOWNLOAD_URL="$SINGBOX_AMD64_URL" ;;
+        amd64v3) SINGBOX_DOWNLOAD_URL="$SINGBOX_AMD64V3_URL" ;;
+        arm64) SINGBOX_DOWNLOAD_URL="$SINGBOX_ARM64_URL" ;;
+    esac
+    
+    if [ -z "$SINGBOX_DOWNLOAD_URL" ]; then
+        echo -e "${RED}错误：无法根据架构 $SINGBOX_ARCH 匹配到下载 URL。请检查顶部配置。${NC}"
+        exit 1
+    fi
 
-# 8. Status Check & Summary
-log_info "Installation Complete. Checking Status..."
-sleep 2
+    # 3. 停止服务 (如果正在运行)，以避免 "Text file busy"
+    if systemctl is-active --quiet sing-box; then
+        echo -e "${YELLOW}正在停止正在运行的 Sing-box 服务以更新核心...${NC}"
+        systemctl stop sing-box
+    fi
+    
+    # 4. 下载核心
+    echo -e "${YELLOW}正在下载 Sing-box 核心 ($SINGBOX_ARCH)...${NC}"
+    mkdir -p $INSTALL_DIR
+    rm -f "$SINGBOX_CORE_PATH" # Prevent Text file busy
+    curl -L -o "$SINGBOX_CORE_PATH" "$SINGBOX_DOWNLOAD_URL"
+    chmod +x $SINGBOX_CORE_PATH
+    echo -e "${GREEN}Sing-box 核心安装成功!${NC}"
+    $SINGBOX_CORE_PATH version
 
-SERVICE_STATUS=$(systemctl is-active tproxy-agent)
-SERVICE_LOGS=$(journalctl -u tproxy-agent -n 5 --no-pager)
+    # 5. 下载配置
+    mkdir -p $CONFIG_DIR
+    CONFIG_JSON_URL="https://ghfast.top/raw.githubusercontent.com/Scu9277/TProxy/refs/heads/main/sing-box/config.json"
+    echo -e "${YELLOW}正在下载 Sing-box 配置文件...${NC}"
+    curl -L -o "$CONFIG_DIR/config.json" "$CONFIG_JSON_URL"
+    
+    # Check if download was successful (JSON check)
+    if [ $(stat -c%s "$CONFIG_DIR/config.json") -lt 100 ]; then
+         echo -e "${RED}❌ 配置文件下载异常 (文件过小)，可能是 URL 错误或 404！${NC}"
+         echo -e "URL: $CONFIG_JSON_URL"
+         cat "$CONFIG_DIR/config.json"
+         exit 1
+    fi
+    echo -e "${GREEN}config.json 下载成功！${NC}"
+    
+    # 6. 创建并启动 Systemd 服务
+    echo "正在创建 systemd 服务..."
+    cat > /etc/systemd/system/sing-box.service <<EOF
+[Unit]
+Description=Sing-Box Service
+After=network.target network-online.target
+Wants=network-online.target
+[Service]
+Type=simple
+LimitNPROC=512
+LimitNOFILE=1048576
+ExecStart=$SINGBOX_CORE_PATH run -c $CONFIG_DIR/config.json
+Restart=on-failure
+RestartSec=10s
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload
+    systemctl enable sing-box
+    echo -e "${YELLOW}正在启动 Sing-box 服务...${NC}"
+    systemctl restart sing-box
+    sleep 2
+    if systemctl is-active --quiet sing-box; then
+        echo -e "${GREEN}✅ Sing-box 服务已成功启动！${NC}"
+    else
+        echo -e "${RED}❌ Sing-box 服务启动失败！${NC}"
+        echo -e "${YELLOW}显示最后 20 行日志用于调试:${NC}"
+        journalctl -u sing-box -n 20 --no-pager
+        exit 1
+    fi
+    echo "----------------------------------------------------------------"
+    echo -e "🎉 ${GREEN}Sing-box 核心安装并配置完毕！${NC}"
+    echo "----------------------------------------------------------------"
+}
 
-echo -e "${CYAN}"
-echo "============================================================"
-echo "                INSTALLATION SUMMARY                        "
-echo "============================================================"
-echo " Service Name : tproxy-agent"
-echo " Status       : $SERVICE_STATUS"
-echo " Install Path : $INSTALL_DIR/tproxy-agent"
-echo " Log Command  : journalctl -u tproxy-agent -f"
-echo "------------------------------------------------------------"
-echo " Recent Logs:"
-echo "$SERVICE_LOGS"
-echo "============================================================"
-echo -e "${NC}"
 
-if [ "$SERVICE_STATUS" != "active" ]; then
-    log_error "Service is NOT active. Please check logs."
-    exit 1
-else
-    log_info "eBPF TProxy Agent deployed successfully!"
-fi
+#=================================================================================
+#   SECTION 2: 独立安装组件 (Modular Components)
+#=================================================================================
+# (此区域函数与 V12 完全相同，未作修改)
+
+# 检查root权限
+check_root() {
+    if [ "$(id -u)" -ne 0 ]; then
+        echo -e "${RED}❌ 错误：此脚本必须以 root 权限运行！${NC}"
+        exit 1
+    fi
+}
+
+# 检查并安装依赖
+check_dependencies() {
+    echo -e "🔍 正在检查系统依赖 (wget, curl, jq, unzip, hostname)..."
+    DEPS=("wget" "curl" "jq" "unzip" "hostname" "grep")
+    MISSING_DEPS=()
+
+    for dep in "${DEPS[@]}"; do
+        if ! command -v "$dep" &> /dev/null; then
+            MISSING_DEPS+=("$dep")
+        fi
+    done
+
+    if [ ${#MISSING_DEPS[@]} -gt 0 ]; then
+        echo -e "${YELLOW}🔧 检测到缺失的依赖: ${MISSING_DEPS[*]} ... 正在尝试自动安装...${NC}"
+        if command -v apt-get > /dev/null; then
+            apt-get update -y
+            apt-get install -y "${MISSING_DEPS[@]}"
+        else
+            echo -e "${RED}❌ 无法自动安装依赖。请手动安装: ${MISSING_DEPS[*]} ${NC}"
+            exit 1
+        fi
+        echo -e "${GREEN}✅ 核心依赖已安装完毕！${NC}"
+    else
+        echo -e "${GREEN}👍 依赖检查通过，全部已安装。${NC}"
+    fi
+    echo "----------------------------------------------------------------"
+}
+
+# ----------------------------------------------------------------
+#   组件 1: 更换系统源
+# ----------------------------------------------------------------
+install_change_source() {
+    echo -e "${BLUE}--- 正在执行 [组件 1: 更换系统源] ---${NC}"
+    echo -e "🔧 正在执行换源脚本 (linuxmirrors.cn/main.sh)..."
+    bash <(curl -sSL https://linuxmirrors.cn/main.sh)
+    echo -e "${GREEN}✅ 换源脚本执行完毕。${NC}"
+    echo "----------------------------------------------------------------"
+}
+
+# ----------------------------------------------------------------
+#   组件 2: DNS 劫持
+# ----------------------------------------------------------------
+install_dns_hijack() {
+    echo -e "${BLUE}--- 正在安装 [组件 2: DNS 劫持] ---${NC}"
+    echo -e "📝 正在配置 /etc/hosts (本机劫持)..."
+    if grep -q "scu.lan" /etc/hosts; then
+        echo -e "${GREEN}👍 /etc/hosts 似乎已配置，跳过。${NC}"
+        echo "----------------------------------------------------------------"
+        return
+    fi
+    cat << 'EOF' | tee -a /etc/hosts > /dev/null
+
+# --- Scu x Duang DNS Hijack (Local) ---
+127.0.0.1   21.cn 21.com scu.cn scu.com shangkouyou.cn shangkouyou.com
+127.0.0.1   21.icu scu.icu shangkouyou.icu
+127.0.0.1   21.wifi scu.wifi shangkouyou.wifi
+127.0.0.1   21.lan scu.lan shangkouyou.lan
+EOF
+    echo -e "${GREEN}✅ /etc/hosts 配置完毕。${NC}"
+    echo "----------------------------------------------------------------"
+}
+
+# ----------------------------------------------------------------
+#   组件 3: Docker
+# ----------------------------------------------------------------
+install_docker() {
+    echo -e "${BLUE}--- 正在安装 [组件 3: Docker] ---${NC}"
+    if command -v docker &> /dev/null; then
+        echo -e "${GREEN}👍 Docker 已经安装，跳过此步骤。${NC}"
+        echo "----------------------------------------------------------------"
+        return
+    fi
+    echo -e "🐳 正在执行 Docker 安装脚本 (linuxmirrors.cn/docker.sh)..."
+    bash <(curl -sSL https://linuxmirrors.cn/docker.sh)
+    if ! command -v docker &> /dev/null; then
+        echo -e "${RED}❌ Docker 安装失败！ 'docker' 命令不可用。${NC}"
+        exit 1
+    fi
+    echo -e "${GREEN}✅ Docker 安装成功。${NC}"
+    echo "----------------------------------------------------------------"
+}
+
+# ----------------------------------------------------------------
+#   组件 4: Sub-Store
+# ----------------------------------------------------------------
+install_substore() {
+    echo -e "${BLUE}--- 正在安装 [组件 4: Sub-Store] ---${NC}"
+    CONTAINER_NAME="sub-store"
+    IMAGE_NAME="xream/sub-store:latest"
+
+    if ! command -v docker &> /dev/null; then
+        echo -e "${RED}❌ 错误：未找到 Docker！${NC}"
+        echo -e "${YELLOW}请先从主菜单选择安装 Docker。${NC}"
+        return
+    fi
+
+    if [ $(docker ps -q -f name=^/${CONTAINER_NAME}$) ]; then
+        echo -e "${GREEN}👍 Sub-Store 容器 'sub-store' 已经在运行，跳过。${NC}"
+        echo "----------------------------------------------------------------"
+        return
+    fi
+
+    if [ $(docker ps -a -q -f name=^/${CONTAINER_NAME}$) ]; then
+        echo -e "${YELLOW}🔄 发现已停止的 'sub-store' 容器，正在尝试启动...${NC}"
+        docker start $CONTAINER_NAME
+        sleep 3
+        if [ $(docker ps -q -f name=^/${CONTAINER_NAME}$) ]; then
+             echo -e "${GREEN}✅ Sub-Store 容器启动成功！${NC}"
+             echo "----------------------------------------------------------------"
+             return
+        else
+             echo -e "${RED}❌ 启动失败，正在移除旧容器并重新创建...${NC}"
+             docker rm $CONTAINER_NAME
+        fi
+    fi
+
+    if ! docker images -q $IMAGE_NAME | grep -q . ; then
+        echo -e "${YELLOW}🔎 未找到 '$IMAGE_NAME' 镜像，正在下载...${NC}"
+        echo -e "📦 正在下载 Sub-Store Docker 镜像包..."
+        wget "https://ghfast.top/github.com/Scu9277/TProxy/releases/download/1.0/sub-store.tar.gz" -O "/root/sub-store.tar.gz"
+        echo -e "🗜️ 正在解压并加载镜像..."
+        tar -xzf "/root/sub-store.tar.gz" -C "/root/"
+        docker load -i "/root/sub-store.tar"
+        rm -f "/root/sub-store.tar.gz" "/root/sub-store.tar"
+    else
+        echo -e "${GREEN}👍 发现 '$IMAGE_NAME' 镜像，跳过下载。${NC}"
+    fi
+
+    echo -e "🚀 正在启动 Sub-Store 容器..."
+    docker run -it -d --restart=always \
+      -e "SUB_STORE_BACKEND_SYNC_CRON=55 23 * * *" \
+      -e "SUB_STORE_FRONTEND_BACKEND_PATH=/21DEDINGZHI" \
+      -p 0.0.0.0:9277:3001 \
+      -v /root/sub-store-data:/opt/app/data \
+      --name $CONTAINER_NAME \
+      $IMAGE_NAME
+    echo -e "⏳ 正在等待 Sub-Store 容器启动 (5秒)..."
+    sleep 5
+    if [ $(docker ps -q -f name=^/${CONTAINER_NAME}$) ]; then
+        echo -e "${GREEN}✅ Sub-Store 容器已成功启动 (端口 9277)！${NC}"
+    else
+        echo -e "${RED}❌ Sub-Store 容器启动失败！${NC}"
+    fi
+    echo "----------------------------------------------------------------"
+}
+
+# ----------------------------------------------------------------
+#   组件 5: TProxy
+# ----------------------------------------------------------------
+install_tproxy() {
+    echo -e "${BLUE}--- 正在安装 [组件 5: TProxy] ---${NC}"
+    echo "请选择 TProxy 模式:"
+    echo "  1) 传统 Shell 脚本模式 (setup-tproxy-ipv4.sh)"
+    echo "  2) 全新 eBPF Agent 模式 (高性能/单二进制/推荐)"
+    echo
+    read -p "请输入选项 [1-2]: " t_choice
+
+    case $t_choice in
+        1)
+            echo -e "🔧 准备执行 TProxy 脚本 (setup-tproxy-ipv4.sh)..."
+            TPROXY_SCRIPT_URL="https://ghfast.top/raw.githubusercontent.com/Scu9277/TProxy/refs/heads/main/Tproxy/setup-tproxy-ipv4.sh"
+            if bash <(curl -sSL "$TPROXY_SCRIPT_URL"); then
+                echo -e "${GREEN}✅ TProxy 脚本执行完毕！${NC}"
+            else
+                echo -e "${RED}❌ TProxy 脚本执行失败。${NC}"
+            fi
+            ;;
+        2)
+            echo -e "🐝 准备安装 eBPF TProxy Agent..."
+            EBPF_INSTALL_URL="https://ghfast.top/raw.githubusercontent.com/Scu9277/eBPF/refs/heads/main/install/install.sh"
+            if bash <(curl -sSL "$EBPF_INSTALL_URL"); then
+                 echo -e "${GREEN}✅ eBPF Agent 安装脚本执行完毕！请检查日志确认服务运行状态。${NC}"
+            else
+                 echo -e "${RED}❌ eBPF Agent 安装失败。${NC}"
+            fi
+            ;;
+        *)
+            echo -e "${RED}❌ 无效选项。${NC}"
+            ;;
+    esac
+    echo "----------------------------------------------------------------"
+}
+
+# ----------------------------------------------------------------
+#   组件 6: 配置网卡IP
+# ----------------------------------------------------------------
+install_renetwork() {
+    echo -e "${BLUE}--- 正在执行 [组件 6: 配置网卡IP] ---${NC}"
+    echo -e "🚀 正在下载并执行 renetwork.sh 脚本..."
+    
+    if bash <(curl -sSL https://ghfast.top/raw.githubusercontent.com/Scu9277/TProxy/refs/heads/main/renetwork.sh); then
+        echo -e "${GREEN}✅ 网卡配置脚本执行完毕。${NC}"
+    else
+        echo -e "${RED}❌ 网卡配置脚本执行失败。${NC}"
+    fi
+    echo "----------------------------------------------------------------"
+}
+
+# ----------------------------------------------------------------
+#   组件 7: 服务管理 (Service Manager)
+# ----------------------------------------------------------------
+manage_services() {
+    while true; do
+        echo -e "${CYAN}--- 服务管理面板 ---${NC}"
+        echo "  1) Mihomo 服务"
+        echo "  2) Sing-box 服务"
+        echo "  3) eBPF TProxy Agent 服务"
+        echo "  0) 返回主菜单"
+        echo
+        read -p "请选择要管理的服务 [1-3 或 0]: " s_svc
+        
+        SVC_NAME=""
+        case $s_svc in
+            1) SVC_NAME="mihomo" ;;
+            2) SVC_NAME="sing-box" ;;
+            3) SVC_NAME="tproxy-agent" ;;
+            0) return ;;
+            *) echo -e "${RED}无效选项${NC}"; continue ;;
+        esac
+
+        echo -e "${YELLOW}正在管理服务: $SVC_NAME${NC}"
+        echo "  1) 启动 (Start)"
+        echo "  2) 停止 (Stop)"
+        echo "  3) 重启 (Restart)"
+        echo "  4) 查看状态 (Status)"
+        echo "  5) 查看日志 (Logs - Recent)"
+        echo "  0) 返回上一级"
+        read -p "请选择操作: " s_act
+
+        case $s_act in
+            1) systemctl start $SVC_NAME; echo -e "${GREEN}已发送启动指令${NC}" ;;
+            2) systemctl stop $SVC_NAME; echo -e "${GREEN}已发送停止指令${NC}" ;;
+            3) systemctl restart $SVC_NAME; echo -e "${GREEN}已发送重启指令${NC}" ;;
+            4) systemctl status $SVC_NAME --no-pager ;;
+            5) journalctl -u $SVC_NAME -n 20 --no-pager ;;
+            0) continue ;;
+            *) echo -e "${RED}无效操作${NC}" ;;
+        esac
+        echo "----------------------------------------------------------------"
+    done
+}
+
+#=================================================================================
+#   SECTION 3: 高级系统工具 (Advanced System Tools)
+#=================================================================================
+# (此区域函数与 V12 完全相同，未作修改)
+
+# ----------------------------------------------------------------
+#   高级 1: 更改主机名
+# ----------------------------------------------------------------
+install_change_hostname() {
+    echo -e "${BLUE}--- 正在执行 [高级 1: 更改主机名] ---${NC}"
+    read -p "请输入你的新主机名 (例如: MyServer): " NEW_HOSTNAME
+    if [ -z "$NEW_HOSTNAME" ]; then
+        echo -e "${RED}❌ 输入为空，操作已取消。${NC}"
+        echo "----------------------------------------------------------------"
+        return
+    fi
+    
+    echo -e "${YELLOW}正在将主机名设置为: $NEW_HOSTNAME ...${NC}"
+    hostnamectl set-hostname "$NEW_HOSTNAME"
+    
+    if [ $? -eq 0 ]; then
+        echo -e "${GREEN}✅ 主机名已成功更改为: $NEW_HOSTNAME${NC}"
+        echo -e "${YELLOW}注意：你可能需要重新登录 SSH 才能看到更改。${NC}"
+    else
+        echo -e "${RED}❌ 更改主机名失败！${NC}"
+    fi
+    echo "----------------------------------------------------------------"
+}
+
+# ----------------------------------------------------------------
+#   高级 2: 系统优化
+# ----------------------------------------------------------------
+install_kejilion_optimizer() {
+    echo -e "${BLUE}--- 正在执行 [高级 2: 科技Lion系统优化脚本] ---${NC}"
+    echo -e "🚀 正在下载并执行 kejilion.sh ..."
+    echo -e "${YELLOW}这将启动一个交互式脚本，请根据其提示操作。${NC}"
+    sleep 3
+    bash <(curl -sL kejilion.sh)
+    echo -e "${GREEN}✅ 科技Lion 脚本执行完毕。${NC}"
+    echo "----------------------------------------------------------------"
+}
+
+# ----------------------------------------------------------------
+#   高级 3: 系统深度清理 (V12 版本)
+# ----------------------------------------------------------------
+install_system_cleanup() {
+    echo -e "${BLUE}--- 正在执行 [高级 3: 系统深度清理] ---${NC}"
+    echo -e "${YELLOW}警告：此操作将：${NC}"
+    echo -e " 1. ${RED}完全卸载 Docker (包括容器、镜像和数据卷)！${NC}"
+    echo -e " 2. 清理 apt 缓存。"
+    echo -e " 3. 移除孤立的系统依赖。"
+    echo -e " 4. 清理内存缓存 (drop_caches)。"
+    echo -e "${RED}这是一个高风险操作，请确保你不再需要 Docker！${NC}"
+    
+    read -p "$(echo -e ${YELLOW}"是否确认执行? [y/N]: "${NC})" choice
+    
+    case "$choice" in
+        y|Y )
+            echo -e "${YELLOW}--- 1/4: 正在卸载 Docker... ---${NC}"
+            if command -v docker &> /dev/null; then
+                if systemctl is-active --quiet docker; then
+                    echo -e "  -> 正在停止运行中的 Docker 服务..."
+                    systemctl stop docker
+                fi
+                if systemctl is-enabled --quiet docker; then
+                    echo -e "  -> 正在禁用 Docker 开机自启..."
+                    systemctl disable docker
+                fi
+                echo -e "  -> G正在彻底清除 Docker 软件包和残留数据..."
+                # 隐藏 apt-get purge 的输出，因为它可能充满警告
+                apt-get purge -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin docker-ce-rootless-extras docker-engine docker.io runc &> /dev/null
+                rm -rf /var/lib/docker
+                rm -rf /var/lib/containerd
+                echo -e "${GREEN}✅ Docker 已彻底移除。${NC}"
+            else
+                echo -e "${GREEN}👍 Docker 未安装，跳过卸载。${NC}"
+            fi
+
+            echo -e "${YELLOW}--- 2/4: 正在清理 apt 缓存... ---${NC}"
+            apt-get clean
+            echo -e "${GREEN}✅ apt 缓存已清理。${NC}"
+
+            echo -e "${YELLOW}--- 3/4: 正在移除不需要的依赖... ---${NC}"
+            apt-get autoremove -y --purge
+            echo -e "${GREEN}✅ 孤立依赖已移除。${NC}"
+
+            echo -e "${YELLOW}--- 4/4: 正在释放内存缓存... ---${NC}"
+            sync
+            echo 3 > /proc/sys/vm/drop_caches
+            echo -e "${GREEN}✅ 内存缓存 (PageCache, dentries, inodes) 已清理。${NC}"
+
+            echo -e "${GREEN}🎉 系统深度清理完成！${NC}"
+            ;;
+        * )
+            echo -e "${GREEN}👍 操作已取消。${NC}"
+            ;;
+    esac
+    echo "----------------------------------------------------------------"
+}
+
+# ----------------------------------------------------------------
+#   高级 4: 重装系统 (V12 版本)
+# ----------------------------------------------------------------
+install_reinstall_os() {
+    echo -e "${RED}==================== 极度危险 ====================${NC}"
+    echo -e "${YELLOW}警告：此操作将从网络下载脚本并重装当前操作系统！${NC}"
+    echo -e "${YELLOW}你选择的版本是: ${GREEN}Debian 13${NC}"
+    echo -e "${RED}所有数据将被永久删除！${NC}"
+    echo -e "${RED}所有数据将被永久删除！${NC}"
+    echo -e "${RED}所有数据将被永久删除！${NC}"
+    echo -e "=================================================="
+    
+    read -p "$(echo -e ${YELLOW}"是否确认重装? (最后警告!) [y/N]: "${NC})" choice
+
+    case "$choice" in
+        y|Y )
+            echo -e "${BLUE}🚀 正在开始重装系统... 你的 SSH 将会断开。${NC}"
+            echo -e "执行: curl -O ... && bash reinstall.sh debian-13"
+            curl -O https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh && bash reinstall.sh debian-13
+            echo -e "${RED}--- 如果你还看得到这条消息，说明脚本执行失败。---${NC}"
+            ;;
+        * )
+            echo -e "${GREEN}👍 操作已取消。${NC}"
+            ;;
+    esac
+    echo "----------------------------------------------------------------"
+}
+
+
+#=================================================================================
+#   SECTION 4: 主菜单 (Main Menu)
+#=================================================================================
+
+# --- V13 变更: 修复 V12 菜单的笔误 ---
+show_logo() {
+    clear
+    # "shangkouyou" - Scu 专属 Logo
+    echo -e "${CYAN}"
+    echo "                                                        "; 
+    echo " ▗▄▄▖▗▖ ▗▖ ▗▄▖ ▗▖  ▗▖ ▗▄▄▖▗▖ ▗▖ ▗▄▖ ▗▖ ▗▖▗▖  ▗▖▗▄▖ ▗▖ ▗▖";
+    echo "▐▌   ▐▌ ▐▌▐▌ ▐▌▐▛▚▖▐▌▐▌   ▐▌▗▞▘▐▌ ▐▌▐▌ ▐▌ ▝▚▞▘▐▌ ▐▌▐▌ ▐▌";
+    echo " ▝▀▚▖▐▛▀▜▌▐▛▀▜▌▐▌ ▝▜▌▐▌▝▜▌▐▛▚▖ ▐▌ ▐▌▐▌ ▐▌  ▐▌ ▐▌ ▐▌▐▌ ▐▌";
+    echo "▗▄▄▞▘▐▌ ▐▌▐▌ ▐▌▐▌  ▐▌▝▚▄▞▘▐▌ ▐▌▝▚▄▞▘▝▚▄▞▘  ▐▌ ▝▚▄▞▘▝▚▄▞▘";
+    echo "                                                        ";   
+    echo -e "${NC}"
+    echo "=================================================="
+    echo "     Mihomo / Sing-box 模块化安装脚本 (V13)" # V13
+    echo " "
+    echo -e "     作者: ${GREEN}shangkouyou Duang Scu${NC}"
+    echo -e "     微信: ${GREEN}shangkouyou${NC} | 邮箱: ${GREEN}shangkouyou@gmail.com${NC}"
+    echo " "
+    echo "=================================================="
+    echo -e "     ${BLUE}服务器 AFF 推荐 (Scu 导航站):${NC}"
+    echo -e "     ${YELLOW}https://dh.21i.icu/${NC}"
+    echo "=================================================="
+}
+
+# 主菜单 (V13 变更)
+main_menu() {
+    show_logo
+    
+    echo
+    echo -e "--- ${BLUE}核心安装 (二选一) ${NC}---"
+    echo "  1) 安装 Mihomo 核心 (带配置)"
+    echo "  2) 安装 Sing-box 核心 (带配置)"
+    echo
+    echo -e "--- ${YELLOW}独立组件 (按需安装) ${NC}---"
+    echo "  3) 更换系统源 (linuxmirrors.cn)"
+    echo "  4) 安装 Docker (linuxmirrors.cn)"
+    # V13 变更: 移除了 V12 中多余的 "S"
+    echo "  5) 安装 Sub-Store (依赖 Docker)"
+    echo "  6) 安装 TProxy (setup-tproxy-ipv4.sh)"
+    echo "  7) 安装 DNS 劫持 (/etc/hosts)"
+    echo "  8) 配置网卡IP (renetwork.sh)"
+    echo "  9) 服务管理 (Start/Stop/Logs)"
+    echo
+    echo -e "--- ${RED}高级系统工具 ${NC}---"
+    echo " 10) 更改主机名 (Hostname)"
+    echo " 11) 运行 科技Lion 优化脚本 (kejilion.sh)"
+    echo -e " 12) ${YELLOW}系统深度清理 (卸载Docker/清缓存/释内存)${NC}"
+    echo -e " 13) ${RED}一键重装系统 (Debian 13 - 极度危险!)${NC}"
+    echo "--------------------------------------------------"
+    echo -e " ${MAGENTA}00) 退出脚本${NC}"
+    echo
+    echo -e " ${MAGENTA}00) 退出脚本${NC}"
+    echo
+    read -p "请输入选项 [1-13 或 00]: " choice
+
+    case $choice in
+        1) install_mihomo_core_and_config ;;
+        2) install_singbox_core_and_config ;;
+        3) install_change_source ;;
+        4) install_docker ;;
+        5) install_substore ;;
+        6) install_tproxy ;;
+        7) install_dns_hijack ;;
+        8)
+            install_renetwork
+            NEW_IP=$(hostname -I | awk '{print $1}')
+            echo -e "${GREEN}网卡配置完毕，请使用新 IP 重新连接 SSH: ${YELLOW}${NEW_IP}${NC}"
+            echo -e "${YELLOW}脚本将在 5 秒后退出，以便你重新连接...${NC}"
+            sleep 5
+            exit 0
+            ;;
+        9) manage_services ;;
+        10) install_change_hostname ;;
+        11) install_kejilion_optimizer ;;
+        12) install_system_cleanup ;;
+        13) install_reinstall_os ;;
+        00)
+            echo "退出脚本。"
+            exit 0
+            ;;
+        *)
+            echo -e "${RED}无效选项，请输入 1 到 13 或 00。${NC}"
+            sleep 2
+            ;;
+    esac
+    
+    # 循环显示主菜单
+    if [ "$choice" != "00" ] && [ "$choice" != "8" ] && [ "$choice" != "13" ]; then
+        read -p "按任意键返回主菜单..."
+        main_menu
+    elif [ "$choice" == "13" ]; then
+         # 如果重装被取消，返回菜单
+        read -p "按任意键返回主菜单..."
+        main_menu
+    fi
+}
+
+# --- 脚本开始执行 ---
+check_root
+check_dependencies
+main_menu
