@@ -388,7 +388,7 @@ install_substore() {
     if ! docker images -q $IMAGE_NAME | grep -q . ; then
         echo -e "${YELLOW}🔎 未找到 '$IMAGE_NAME' 镜像，正在下载...${NC}"
         echo -e "📦 正在下载 Sub-Store Docker 镜像包..."
-        wget "https://ghfast.top/github.com/Scu9277/eBPF/releases/download/1.0/sub-store.tar.gz" -O "/root/sub-store.tar.gz"
+        wget "https://ghfast.top/github.com/Scu9277/TProxy/releases/download/1.0/sub-store.tar.gz" -O "/root/sub-store.tar.gz"
         echo -e "🗜️ 正在解压并加载镜像..."
         tar -xzf "/root/sub-store.tar.gz" -C "/root/"
         docker load -i "/root/sub-store.tar"
