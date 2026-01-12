@@ -26,19 +26,27 @@ log "开始加载 IPv4 TProxy eBPF TC 规则 (接口: $INTERFACE)..."
 # 检查并安装依赖
 check_and_install_deps() {
     log "检查依赖..."
-    local deps=(clang llvm iproute2 bpftool libbpf-dev)
+    local deps=(clang llvm iproute2 bpftool libbpf-dev iptables)
     local missing_deps=()
     
     for dep in "${deps[@]}"; do
-        if ! command -v "${dep%% *}" &> /dev/null && [ "$dep" != "libbpf-dev" ]; then
-            missing_deps+=($dep)
+        if [ "$dep" = "libbpf-dev" ]; then
+            # 检查 libbpf-dev 是否安装
+            if [ ! -d "/usr/include/bpf" ]; then
+                missing_deps+=("libbpf-dev")
+            fi
+        elif [ "$dep" = "iptables" ]; then
+            # 检查 iptables 是否安装
+            if ! command -v iptables &> /dev/null; then
+                missing_deps+=("iptables")
+            fi
+        else
+            # 检查其他依赖
+            if ! command -v "${dep%% *}" &> /dev/null; then
+                missing_deps+=($dep)
+            fi
         fi
     done
-    
-    # 检查 libbpf-dev 是否安装
-    if [ ! -d "/usr/include/bpf" ]; then
-        missing_deps+=("libbpf-dev")
-    fi
     
     # 尝试多种方法检查内核头文件
     local found_headers=false
@@ -221,8 +229,15 @@ configure_iptables_tproxy() {
     
     # 检查 iptables 是否可用
     if ! command -v iptables &> /dev/null; then
-        log "警告: iptables 未安装，跳过 TPROXY 规则配置"
-        return 0
+        log "错误: iptables 未安装，这是必需的！"
+        log "正在尝试安装 iptables..."
+        apt-get update > /dev/null 2>&1
+        apt-get install -y iptables > /dev/null 2>&1
+        if ! command -v iptables &> /dev/null; then
+            log "错误: iptables 安装失败，无法继续"
+            exit 1
+        fi
+        log "iptables 安装成功"
     fi
     
     # 清理旧的 TPROXY 规则
