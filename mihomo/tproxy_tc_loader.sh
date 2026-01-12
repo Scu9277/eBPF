@@ -35,9 +35,20 @@ check_and_install_deps() {
         fi
     done
     
-    # 检查内核头文件是否安装
-    if [ ! -f "/usr/include/asm/types.h" ]; then
-        missing_deps+=("linux-headers-$(uname -r)")
+    # 尝试多种方法检查内核头文件
+    local found_headers=false
+    local kernel_headers_pkg="linux-headers-$(uname -r)"
+    
+    # 检查常见的头文件位置
+    if [ -f "/usr/include/asm/types.h" ] || \
+       [ -f "/usr/src/$kernel_headers_pkg/include/asm/types.h" ] || \
+       [ -d "/usr/include/x86_64-linux-gnu/asm" ]; then
+        found_headers=true
+    fi
+    
+    # 如果找不到头文件，添加到依赖列表
+    if [ "$found_headers" = false ]; then
+        missing_deps+=($kernel_headers_pkg)
     fi
     
     if [ ${#missing_deps[@]} -gt 0 ]; then
@@ -58,11 +69,40 @@ check_and_install_deps() {
 compile_bpf() {
     log "编译 eBPF 程序..."
     cd "$SCRIPT_DIR" || exit 1
-    clang -O2 -target bpf -c "$BPF_PROG" -o "$BPF_FILE"
-    if [ $? -ne 0 ]; then
-        log "错误: eBPF 程序编译失败"
-        exit 1
+    
+    # 查找正确的头文件路径
+    local kernel_headers_pkg="linux-headers-$(uname -r)"
+    local header_paths=""
+    
+    # 添加可能的头文件路径
+    if [ -d "/usr/include/x86_64-linux-gnu/asm" ]; then
+        header_paths="-I/usr/include/x86_64-linux-gnu"
+    elif [ -d "/usr/src/$kernel_headers_pkg/include" ]; then
+        header_paths="-I/usr/src/$kernel_headers_pkg/include"
     fi
+    
+    # 调试信息：打印当前目录和文件列表
+    log "调试: 当前目录: $SCRIPT_DIR"
+    log "调试: 目录内容: $(ls -la "$SCRIPT_DIR")"
+    
+    # 修改编译命令，明确指定头文件路径
+    clang $header_paths -O2 -target bpf -c "$BPF_PROG" -o "$BPF_FILE" 2>&1 | tee -a "$LOG_FILE"
+    
+    if [ $? -ne 0 ]; then
+        log "错误: eBPF 程序编译失败，尝试使用 bpftool 编译..."
+        
+        # 尝试使用 bpftool 编译，它能更好地处理内核头文件
+        bpftool gen object "$BPF_FILE" "$BPF_PROG" 2>&1 | tee -a "$LOG_FILE"
+        if [ $? -ne 0 ]; then
+            log "错误: bpftool 编译也失败"
+            log "调试: 检查 bpftool 版本: $(bpftool --version)"
+            log "调试: 检查内核版本: $(uname -r)"
+            log "调试: 查找 asm 目录: $(find /usr -name asm -type d | head -5)"
+            exit 1
+        fi
+        log "警告: 使用 bpftool 替代编译成功"
+    fi
+    
     log "eBPF 程序编译成功"
 }
 
