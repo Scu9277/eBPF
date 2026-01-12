@@ -35,6 +35,11 @@ check_and_install_deps() {
         fi
     done
     
+    # 检查内核头文件是否安装
+    if [ ! -f "/usr/include/asm/types.h" ]; then
+        missing_deps+=("linux-headers-$(uname -r)")
+    fi
+    
     if [ ${#missing_deps[@]} -gt 0 ]; then
         log "正在安装缺少的依赖: ${missing_deps[*]}"
         apt-get update > /dev/null
