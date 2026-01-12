@@ -26,14 +26,19 @@ log "开始加载 IPv4 TProxy eBPF TC 规则 (接口: $INTERFACE)..."
 # 检查并安装依赖
 check_and_install_deps() {
     log "检查依赖..."
-    local deps=(clang llvm iproute2 bpftool)
+    local deps=(clang llvm iproute2 bpftool libbpf-dev)
     local missing_deps=()
     
     for dep in "${deps[@]}"; do
-        if ! command -v "${dep%% *}" &> /dev/null; then
+        if ! command -v "${dep%% *}" &> /dev/null && [ "$dep" != "libbpf-dev" ]; then
             missing_deps+=($dep)
         fi
     done
+    
+    # 检查 libbpf-dev 是否安装
+    if [ ! -d "/usr/include/bpf" ]; then
+        missing_deps+=("libbpf-dev")
+    fi
     
     # 尝试多种方法检查内核头文件
     local found_headers=false
@@ -73,6 +78,7 @@ compile_bpf() {
     # 查找正确的头文件路径
     local kernel_headers_pkg="linux-headers-$(uname -r)"
     local header_paths=""
+    local compile_success=false
     
     # 添加可能的头文件路径
     if [ -d "/usr/include/x86_64-linux-gnu/asm" ]; then
@@ -81,29 +87,57 @@ compile_bpf() {
         header_paths="-I/usr/src/$kernel_headers_pkg/include"
     fi
     
-    # 调试信息：打印当前目录和文件列表
+    # 调试信息
     log "调试: 当前目录: $SCRIPT_DIR"
     log "调试: 目录内容: $(ls -la "$SCRIPT_DIR")"
+    log "调试: 头文件路径: $header_paths"
     
-    # 修改编译命令，明确指定头文件路径
-    clang $header_paths -O2 -target bpf -c "$BPF_PROG" -o "$BPF_FILE" 2>&1 | tee -a "$LOG_FILE"
+    # 尝试使用 clang 编译
+    log "尝试使用 clang 编译..."
+    local clang_output
+    clang_output=$(clang $header_paths -O2 -target bpf -c "$BPF_PROG" -o "$BPF_FILE" 2>&1)
+    local clang_status=$?
     
-    if [ $? -ne 0 ]; then
-        log "错误: eBPF 程序编译失败，尝试使用 bpftool 编译..."
-        
-        # 尝试使用 bpftool 编译，它能更好地处理内核头文件
-        bpftool gen object "$BPF_FILE" "$BPF_PROG" 2>&1 | tee -a "$LOG_FILE"
-        if [ $? -ne 0 ]; then
-            log "错误: bpftool 编译也失败"
-            log "调试: 检查 bpftool 版本: $(bpftool --version)"
-            log "调试: 检查内核版本: $(uname -r)"
-            log "调试: 查找 asm 目录: $(find /usr -name asm -type d | head -5)"
-            exit 1
-        fi
-        log "警告: 使用 bpftool 替代编译成功"
+    if [ -n "$clang_output" ]; then
+        echo "$clang_output" | tee -a "$LOG_FILE"
     fi
     
-    log "eBPF 程序编译成功"
+    if [ $clang_status -eq 0 ] && [ -f "$BPF_FILE" ]; then
+        log "clang 编译成功"
+        compile_success=true
+    else
+        log "clang 编译失败，状态码: $clang_status"
+    fi
+    
+    # 如果 clang 失败，尝试使用 bpftool
+    if [ "$compile_success" = false ]; then
+        log "尝试使用 bpftool 编译..."
+        local bpftool_output
+        bpftool_output=$(bpftool gen object "$BPF_FILE" "$BPF_PROG" 2>&1)
+        local bpftool_status=$?
+        
+        if [ -n "$bpftool_output" ]; then
+            echo "$bpftool_output" | tee -a "$LOG_FILE"
+        fi
+        
+        if [ $bpftool_status -eq 0 ] && [ -f "$BPF_FILE" ]; then
+            log "bpftool 编译成功"
+            compile_success=true
+        else
+            log "bpftool 编译也失败，状态码: $bpftool_status"
+        fi
+    fi
+    
+    # 最终检查
+    if [ "$compile_success" = true ] && [ -f "$BPF_FILE" ]; then
+        log "eBPF 程序编译成功: $(ls -lh "$BPF_FILE")"
+    else
+        log "错误: eBPF 程序编译失败"
+        log "调试: 检查 bpftool 版本: $(bpftool --version 2>&1 | head -1)"
+        log "调试: 检查内核版本: $(uname -r)"
+        log "调试: 查找 bpf 头文件: $(find /usr -name 'bpf_endian.h' 2>/dev/null | head -3)"
+        exit 1
+    fi
 }
 
 # 清理旧规则
@@ -129,6 +163,14 @@ cleanup_old_rules() {
 load_bpf_to_tc() {
     log "加载 eBPF 程序到 TC..."
     
+    # 检查文件是否存在
+    if [ ! -f "$SCRIPT_DIR/$BPF_FILE" ]; then
+        log "错误: eBPF 文件不存在: $SCRIPT_DIR/$BPF_FILE"
+        exit 1
+    fi
+    
+    log "eBPF 文件信息: $(ls -lh "$SCRIPT_DIR/$BPF_FILE")"
+    
     # 添加 clsact 队列规则
     tc qdisc add dev "$INTERFACE" clsact 2>/dev/null || {
         log "错误: 无法添加 clsact 队列规则"
@@ -136,7 +178,7 @@ load_bpf_to_tc() {
     }
     
     # 加载 eBPF 程序到 ingress 钩子
-    tc filter add dev "$INTERFACE" ingress bpf da obj "$BPF_FILE" sec classifier
+    tc filter add dev "$INTERFACE" ingress bpf da obj "$SCRIPT_DIR/$BPF_FILE" sec classifier
     if [ $? -ne 0 ]; then
         log "错误: 无法加载 eBPF 程序到 TC"
         exit 1

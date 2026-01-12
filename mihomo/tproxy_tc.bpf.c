@@ -5,13 +5,25 @@
 #include <linux/tcp.h>
 #include <linux/udp.h>
 #include <linux/in.h>
-#include <bpf/bpf_endian.h>
 #include <bpf/bpf_helpers.h>
 
 // 配置参数
 #define TPROXY_PORT 9420
 #define TPROXY_MARK 0x2333
 #define DOCKER_PORT 9277
+
+// 简化的字节序转换函数（替代 bpf_endian.h）
+static inline __be32 my_bpf_htonl(__be32 x) {
+    return (__be32)(((__u32)x >> 24) | ((__u32)x << 8) | ((__u32)x >> 8) | ((__u32)x << 24));
+}
+
+static inline __be16 my_bpf_htons(__be16 x) {
+    return (__be16)(((__u8)x << 8) | (__u8)(x >> 8));
+}
+
+static inline __be16 my_bpf_ntohs(__be16 x) {
+    return my_bpf_htons(x);
+}
 
 // 豁免的网络范围
 struct exempt_net {
@@ -21,18 +33,18 @@ struct exempt_net {
 
 // 豁免网络列表
 struct exempt_net exempt_nets[] = {
-    { .addr = bpf_htonl(0x0A000000), .prefix_len = 8 },   // 10.0.0.0/8
-    { .addr = bpf_htonl(0xAC100000), .prefix_len = 12 },  // 172.16.0.0/12
-    { .addr = bpf_htonl(0xC0A80000), .prefix_len = 16 },  // 192.168.0.0/16
-    { .addr = bpf_htonl(0x7F000000), .prefix_len = 8 },   // 127.0.0.0/8
-    { .addr = bpf_htonl(0xFFFFFFFF), .prefix_len = 32 },  // 255.255.255.255
+    { .addr = my_bpf_htonl(0x0A000000), .prefix_len = 8 },   // 10.0.0.0/8
+    { .addr = my_bpf_htonl(0xAC100000), .prefix_len = 12 },  // 172.16.0.0/12
+    { .addr = my_bpf_htonl(0xC0A80000), .prefix_len = 16 },  // 192.168.0.0/16
+    { .addr = my_bpf_htonl(0x7F000000), .prefix_len = 8 },   // 127.0.0.0/8
+    { .addr = my_bpf_htonl(0xFFFFFFFF), .prefix_len = 32 },  // 255.255.255.255
 };
 
 // 检查 IP 是否在豁免网络中
 static inline bool is_exempt(__be32 addr) {
     for (int i = 0; i < sizeof(exempt_nets) / sizeof(exempt_nets[0]); i++) {
         struct exempt_net *net = &exempt_nets[i];
-        __be32 mask = bpf_htonl(~((1 << (32 - net->prefix_len)) - 1));
+        __be32 mask = my_bpf_htonl(~((1 << (32 - net->prefix_len)) - 1));
         if ((addr & mask) == net->addr) {
             return true;
         }
@@ -58,7 +70,7 @@ int tproxy_tc_handler(struct __sk_buff *skb) {
     }
 
     eth_proto = eth->h_proto;
-    if (eth_proto != bpf_htons(ETH_P_IP)) {
+    if (eth_proto != my_bpf_htons(ETH_P_IP)) {
         return TC_ACT_OK;
     }
 
@@ -81,7 +93,7 @@ int tproxy_tc_handler(struct __sk_buff *skb) {
         if ((void *)tcp + sizeof(*tcp) > data_end) {
             return TC_ACT_OK;
         }
-        dport = bpf_ntohs(tcp->dest);
+        dport = my_bpf_ntohs(tcp->dest);
         
         // 豁免 Docker 端口
         if (dport == DOCKER_PORT) {
@@ -98,7 +110,7 @@ int tproxy_tc_handler(struct __sk_buff *skb) {
         if ((void *)udp + sizeof(*udp) > data_end) {
             return TC_ACT_OK;
         }
-        dport = bpf_ntohs(udp->dest);
+        dport = my_bpf_ntohs(udp->dest);
         
         // 豁免 Docker 端口
         if (dport == DOCKER_PORT) {
