@@ -161,7 +161,6 @@ cleanup_old_rules() {
     
     # 清理 iptables TPROXY 规则
     if command -v iptables &> /dev/null; then
-        iptables -t mangle -D OUTPUT -m mark --mark "$TPROXY_MARK" -j TPROXY --on-port "$TPROXY_PORT" --tproxy-mark "$TPROXY_MARK" 2>/dev/null || true
         iptables -t mangle -D PREROUTING -m mark --mark "$TPROXY_MARK" -j TPROXY --on-port "$TPROXY_PORT" --tproxy-mark "$TPROXY_MARK" 2>/dev/null || true
     fi
     
@@ -241,18 +240,36 @@ configure_iptables_tproxy() {
     fi
     
     # 清理旧的 TPROXY 规则
-    iptables -t mangle -D OUTPUT -m mark --mark "$TPROXY_MARK" -j TPROXY --on-port "$TPROXY_PORT" --tproxy-mark "$TPROXY_MARK" 2>/dev/null || true
+    iptables -t mangle -D PREROUTING -m mark --mark "$TPROXY_MARK" -j TPROXY --on-port "$TPROXY_PORT" --tproxy-mark "$TPROXY_MARK" 2>/dev/null || true
     
-    # 添加 OUTPUT 链的 TPROXY 规则（处理本地生成的流量）
-    iptables -t mangle -A OUTPUT -m mark --mark "$TPROXY_MARK" -p tcp -j TPROXY --on-port "$TPROXY_PORT" --tproxy-mark "$TPROXY_MARK"
-    iptables -t mangle -A OUTPUT -m mark --mark "$TPROXY_MARK" -p udp -j TPROXY --on-port "$TPROXY_PORT" --tproxy-mark "$TPROXY_MARK"
+    # 注意：TPROXY 只能在 PREROUTING 链使用，不支持 OUTPUT 链
+    # 对于网关模式，主要处理转发的流量，这些流量会经过 PREROUTING 链
+    log "添加 PREROUTING 链的 TPROXY 规则（处理转发的流量）..."
     
     # 添加 PREROUTING 链的 TPROXY 规则（处理转发的流量）
-    iptables -t mangle -D PREROUTING -m mark --mark "$TPROXY_MARK" -j TPROXY --on-port "$TPROXY_PORT" --tproxy-mark "$TPROXY_MARK" 2>/dev/null || true
-    iptables -t mangle -A PREROUTING -m mark --mark "$TPROXY_MARK" -p tcp -j TPROXY --on-port "$TPROXY_PORT" --tproxy-mark "$TPROXY_MARK"
-    iptables -t mangle -A PREROUTING -m mark --mark "$TPROXY_MARK" -p udp -j TPROXY --on-port "$TPROXY_PORT" --tproxy-mark "$TPROXY_MARK"
+    local tcp_output
+    tcp_output=$(iptables -t mangle -A PREROUTING -m mark --mark "$TPROXY_MARK" -p tcp -j TPROXY --on-port "$TPROXY_PORT" --tproxy-mark "$TPROXY_MARK" 2>&1)
+    if [ $? -eq 0 ]; then
+        log "TCP TPROXY 规则添加成功"
+    else
+        log "警告: TCP TPROXY 规则添加失败: $tcp_output"
+    fi
     
-    log "iptables TPROXY 规则配置成功"
+    local udp_output
+    udp_output=$(iptables -t mangle -A PREROUTING -m mark --mark "$TPROXY_MARK" -p udp -j TPROXY --on-port "$TPROXY_PORT" --tproxy-mark "$TPROXY_MARK" 2>&1)
+    if [ $? -eq 0 ]; then
+        log "UDP TPROXY 规则添加成功"
+    else
+        log "警告: UDP TPROXY 规则添加失败: $udp_output"
+    fi
+    
+    # 验证规则
+    local rule_count=$(iptables -t mangle -L PREROUTING -n -v 2>/dev/null | grep -c TPROXY || echo "0")
+    if [ "$rule_count" -gt 0 ]; then
+        log "iptables TPROXY 规则配置成功（找到 $rule_count 条规则）"
+    else
+        log "警告: 未找到 TPROXY 规则，请手动检查"
+    fi
 }
 
 # 配置 sysctl 参数
