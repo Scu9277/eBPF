@@ -25,10 +25,30 @@ log() {
     echo "$msg"
 }
 
+# 构建下载 URL（不同加速域名格式不同）
+build_download_url() {
+    local domain=$1
+    local filename=$2
+    
+    # 原始 GitHub URL
+    local original_url="https://raw.githubusercontent.com/${GITHUB_REPO}/${GITHUB_BRANCH}/${GITHUB_PATH}/${filename}"
+    
+    if [ "$domain" = "https://raw.githubusercontent.com" ]; then
+        # 直接使用原始 URL
+        echo "$original_url"
+    elif [ "$domain" = "https://ghfast.top" ]; then
+        # ghfast.top: 直接拼接路径（去掉 https://）
+        echo "${domain}/${GITHUB_REPO}/${GITHUB_BRANCH}/${GITHUB_PATH}/${filename}"
+    else
+        # gh-proxy.org 系列：需要完整原始 URL
+        echo "${domain}/${original_url#https://}"
+    fi
+}
+
 # 测试域名延迟
 test_domain_latency() {
     local domain=$1
-    local test_url="${domain}/${GITHUB_REPO}/${GITHUB_BRANCH}/${GITHUB_PATH}/${BPF_FILE}"
+    local test_url=$(build_download_url "$domain" "$BPF_FILE")
     
     # 使用 timeout 和 curl 测试延迟（最多等待3秒）
     local start_time=$(date +%s%N)
@@ -53,25 +73,26 @@ select_fastest_domain() {
     local best_latency=999999
     local results=()
     
-    echo ""
-    echo "序号 | 加速域名 | 延迟"
-    echo "----------------------------------------"
+    # 使用 stderr 输出表格，避免干扰返回值
+    echo "" >&2
+    echo "序号 | 加速域名 | 延迟" >&2
+    echo "----------------------------------------" >&2
     
     for i in "${!PROXY_DOMAINS[@]}"; do
         local domain="${PROXY_DOMAINS[$i]}"
         local num=$((i + 1))
         local display_domain="${domain#https://}"
         
-        # 显示测试中
-        printf "  %d | %-30s | 测试中...\r" "$num" "$display_domain"
+        # 显示测试中（使用 stderr）
+        printf "  %d | %-30s | 测试中...\r" "$num" "$display_domain" >&2
         
         local latency=$(test_domain_latency "$domain")
         
         if [ "$latency" = "timeout" ]; then
-            printf "  %d | %-30s | timeout ms\n" "$num" "$display_domain"
+            printf "  %d | %-30s | timeout ms\n" "$num" "$display_domain" >&2
             results+=("$num|$domain|timeout")
         else
-            printf "  %d | %-30s | %d ms\n" "$num" "$display_domain" "$latency"
+            printf "  %d | %-30s | %d ms\n" "$num" "$display_domain" "$latency" >&2
             results+=("$num|$domain|$latency")
             
             # 更新最快域名
@@ -82,7 +103,7 @@ select_fastest_domain() {
         fi
     done
     
-    echo ""
+    echo "" >&2
     
     # 如果没有找到可用的域名，使用第一个作为默认
     if [ -z "$best_domain" ]; then
@@ -92,6 +113,7 @@ select_fastest_domain() {
         log "已选择加速域名: $best_domain (延迟: ${best_latency}ms)"
     fi
     
+    # 输出到 stdout（用于命令替换）
     echo "$best_domain"
 }
 
@@ -162,7 +184,7 @@ download_file() {
     local filename=$2
     local output=$3
     
-    local url="${base_url}/${GITHUB_REPO}/${GITHUB_BRANCH}/${GITHUB_PATH}/${filename}"
+    local url=$(build_download_url "$base_url" "$filename")
     
     log "开始下载 ${filename}..."
     log "使用域名: $base_url"
@@ -171,14 +193,20 @@ download_file() {
     # 尝试下载，最多重试3次
     for ((i=1; i<=3; i++)); do
         log "第 $i 次尝试下载"
-        if curl -s -L -f -o "$output" "$url" && [ -s "$output" ]; then
-            log "✅ 成功下载 ${filename}"
+        local http_code=$(curl -s -L -w "%{http_code}" -o "$output" "$url" 2>/dev/null || echo "000")
+        local actual_code="${http_code: -3}"
+        
+        if [ "$actual_code" = "200" ] && [ -s "$output" ]; then
+            log "✅ 成功下载 ${filename} (HTTP $actual_code)"
             return 0
+        else
+            log "下载失败 (HTTP ${actual_code:-未知})"
+            [ -f "$output" ] && rm -f "$output"
         fi
         sleep 1
     done
     
-    log "❌ 下载 ${filename} 失败"
+    log "❌ 下载 ${filename} 失败，请检查网络连接或 URL 是否正确"
     return 1
 }
 
