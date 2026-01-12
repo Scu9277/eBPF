@@ -41,10 +41,6 @@ int tproxy_tc_handler(struct __sk_buff *skb) {
     __u16 eth_proto;
     __u8 ip_proto;
     __u16 dport;
-    struct bpf_sock_tuple tuple = {};
-    int tuple_len = 0;
-    struct bpf_sock *sk = NULL;
-    long ret;
 
     // 检查以太网头部
     if ((void *)eth + sizeof(*eth) > data_end) {
@@ -84,27 +80,9 @@ int tproxy_tc_handler(struct __sk_buff *skb) {
             return TC_ACT_OK;
         }
         
-        // 构建 socket tuple
-        tuple.ipv4.saddr = ip->saddr;
-        tuple.ipv4.sport = tcp->source;
-        tuple.ipv4.daddr = ip->daddr;
-        tuple.ipv4.dport = tcp->dest;
-        tuple_len = sizeof(tuple.ipv4);
-        
-        // 查找监听在 TProxy 端口的 socket
-        struct bpf_sock_tuple listener_tuple = {};
-        listener_tuple.ipv4.daddr = bpf_htonl(INADDR_ANY);
-        listener_tuple.ipv4.dport = bpf_htons(TPROXY_PORT);
-        
-        sk = bpf_skc_lookup_tcp(skb, &listener_tuple, tuple_len, BPF_F_CURRENT_NETNS, 0);
-        if (sk) {
-            ret = bpf_sk_assign(skb, sk, 0);
-            bpf_sk_release(sk);
-            if (ret == 0) {
-                skb->mark = TPROXY_MARK;
-                return TC_ACT_OK;
-            }
-        }
+        // 设置 TProxy 标记，让策略路由处理转发
+        skb->mark = TPROXY_MARK;
+        return TC_ACT_OK;
     }
     // 处理 UDP
     else if (ip_proto == IPPROTO_UDP) {
@@ -126,27 +104,9 @@ int tproxy_tc_handler(struct __sk_buff *skb) {
             return TC_ACT_SHOT;
         }
         
-        // 构建 socket tuple
-        tuple.ipv4.saddr = ip->saddr;
-        tuple.ipv4.sport = udp->source;
-        tuple.ipv4.daddr = ip->daddr;
-        tuple.ipv4.dport = udp->dest;
-        tuple_len = sizeof(tuple.ipv4);
-        
-        // 查找监听在 TProxy 端口的 socket
-        struct bpf_sock_tuple listener_tuple = {};
-        listener_tuple.ipv4.daddr = bpf_htonl(INADDR_ANY);
-        listener_tuple.ipv4.dport = bpf_htons(TPROXY_PORT);
-        
-        sk = bpf_sk_lookup_udp(skb, &listener_tuple, tuple_len, BPF_F_CURRENT_NETNS, 0);
-        if (sk) {
-            ret = bpf_sk_assign(skb, sk, 0);
-            bpf_sk_release(sk);
-            if (ret == 0) {
-                skb->mark = TPROXY_MARK;
-                return TC_ACT_OK;
-            }
-        }
+        // 设置 TProxy 标记，让策略路由处理转发
+        skb->mark = TPROXY_MARK;
+        return TC_ACT_OK;
     }
     
     return TC_ACT_OK;

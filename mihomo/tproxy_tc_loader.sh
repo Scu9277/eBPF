@@ -151,6 +151,12 @@ cleanup_old_rules() {
     ip rule del fwmark "$TPROXY_MARK" table "$TABLE_ID" 2>/dev/null || true
     ip route flush table "$TABLE_ID" 2>/dev/null || true
     
+    # 清理 iptables TPROXY 规则
+    if command -v iptables &> /dev/null; then
+        iptables -t mangle -D OUTPUT -m mark --mark "$TPROXY_MARK" -j TPROXY --on-port "$TPROXY_PORT" --tproxy-mark "$TPROXY_MARK" 2>/dev/null || true
+        iptables -t mangle -D PREROUTING -m mark --mark "$TPROXY_MARK" -j TPROXY --on-port "$TPROXY_PORT" --tproxy-mark "$TPROXY_MARK" 2>/dev/null || true
+    fi
+    
     # 清理旧的 systemd 服务
     systemctl stop "$SERVICE_NAME" 2>/dev/null || true
     systemctl disable "$SERVICE_NAME" 2>/dev/null || true
@@ -192,13 +198,14 @@ configure_policy_routing() {
     log "配置策略路由..."
     
     # 添加策略路由规则
-    ip rule add fwmark "$TPROXY_MARK" table "$TABLE_ID"
-    if [ $? -ne 0 ]; then
-        log "错误: 无法添加策略路由规则"
-        exit 1
-    fi
+    ip rule add fwmark "$TPROXY_MARK" table "$TABLE_ID" 2>/dev/null || {
+        log "警告: 策略路由规则可能已存在，尝试删除后重新添加"
+        ip rule del fwmark "$TPROXY_MARK" table "$TABLE_ID" 2>/dev/null || true
+        ip rule add fwmark "$TPROXY_MARK" table "$TABLE_ID"
+    }
     
     # 添加本地默认路由
+    ip route flush table "$TABLE_ID" 2>/dev/null || true
     ip route add local default dev lo table "$TABLE_ID"
     if [ $? -ne 0 ]; then
         log "错误: 无法添加本地默认路由"
@@ -206,6 +213,31 @@ configure_policy_routing() {
     fi
     
     log "策略路由配置成功"
+}
+
+# 配置 iptables TPROXY 规则（将标记的流量转发到 TProxy 端口）
+configure_iptables_tproxy() {
+    log "配置 iptables TPROXY 规则..."
+    
+    # 检查 iptables 是否可用
+    if ! command -v iptables &> /dev/null; then
+        log "警告: iptables 未安装，跳过 TPROXY 规则配置"
+        return 0
+    fi
+    
+    # 清理旧的 TPROXY 规则
+    iptables -t mangle -D OUTPUT -m mark --mark "$TPROXY_MARK" -j TPROXY --on-port "$TPROXY_PORT" --tproxy-mark "$TPROXY_MARK" 2>/dev/null || true
+    
+    # 添加 OUTPUT 链的 TPROXY 规则（处理本地生成的流量）
+    iptables -t mangle -A OUTPUT -m mark --mark "$TPROXY_MARK" -p tcp -j TPROXY --on-port "$TPROXY_PORT" --tproxy-mark "$TPROXY_MARK"
+    iptables -t mangle -A OUTPUT -m mark --mark "$TPROXY_MARK" -p udp -j TPROXY --on-port "$TPROXY_PORT" --tproxy-mark "$TPROXY_MARK"
+    
+    # 添加 PREROUTING 链的 TPROXY 规则（处理转发的流量）
+    iptables -t mangle -D PREROUTING -m mark --mark "$TPROXY_MARK" -j TPROXY --on-port "$TPROXY_PORT" --tproxy-mark "$TPROXY_MARK" 2>/dev/null || true
+    iptables -t mangle -A PREROUTING -m mark --mark "$TPROXY_MARK" -p tcp -j TPROXY --on-port "$TPROXY_PORT" --tproxy-mark "$TPROXY_MARK"
+    iptables -t mangle -A PREROUTING -m mark --mark "$TPROXY_MARK" -p udp -j TPROXY --on-port "$TPROXY_PORT" --tproxy-mark "$TPROXY_MARK"
+    
+    log "iptables TPROXY 规则配置成功"
 }
 
 # 配置 sysctl 参数
@@ -318,6 +350,7 @@ load_only() {
     cleanup_old_rules
     load_bpf_to_tc
     configure_policy_routing
+    configure_iptables_tproxy
     configure_sysctl
     log "✅ 仅加载模式完成"
     exit 0
@@ -382,6 +415,9 @@ main() {
     
     # 配置策略路由
     configure_policy_routing
+    
+    # 配置 iptables TPROXY 规则
+    configure_iptables_tproxy
     
     # 配置 sysctl 参数
     configure_sysctl
