@@ -212,14 +212,65 @@ configure_policy_routing() {
 configure_sysctl() {
     log "配置 sysctl 参数..."
     
-    # 启用 IP 转发
+    # 基础网络参数
     sysctl -w net.ipv4.ip_forward=1 > /dev/null
-    
-    # 启用本地端口重用（用于 TProxy）
     sysctl -w net.ipv4.ip_local_port_range="1024 65535" > /dev/null
     sysctl -w net.ipv4.tcp_tw_reuse=1 > /dev/null
     
-    log "sysctl 参数配置成功"
+    # 优化连接参数
+    sysctl -w net.core.somaxconn=4096 > /dev/null
+    sysctl -w net.ipv4.tcp_max_syn_backlog=4096 > /dev/null
+    
+    # 检查 BBR 支持
+    local bbr_supported=false
+    if lsmod | grep -q tcp_bbr 2>/dev/null; then
+        bbr_supported=true
+    elif modprobe tcp_bbr 2>/dev/null; then
+        bbr_supported=true
+    fi
+    
+    # 启用 BBR 拥塞控制（如果内核支持）
+    if [ "$bbr_supported" = true ]; then
+        sysctl -w net.core.default_qdisc=fq > /dev/null
+        sysctl -w net.ipv4.tcp_congestion_control=bbr > /dev/null
+        log "BBR 拥塞控制已启用"
+    else
+        log "警告: 内核不支持 BBR，跳过 BBR 配置"
+    fi
+    
+    # 持久化配置到 /etc/sysctl.d/
+    local sysctl_file="/etc/sysctl.d/99-tproxy-optimization.conf"
+    log "持久化 sysctl 配置到 $sysctl_file"
+    
+    {
+        echo "# eBPF TC TProxy 系统优化配置"
+        echo "# 自动生成于 $(date +"%Y-%m-%d %H:%M:%S")"
+        echo ""
+        echo "# IP 转发"
+        echo "net.ipv4.ip_forward = 1"
+        echo ""
+        echo "# 端口范围"
+        echo "net.ipv4.ip_local_port_range = 1024 65535"
+        echo ""
+        echo "# TCP 优化"
+        echo "net.ipv4.tcp_tw_reuse = 1"
+        echo "net.core.somaxconn = 4096"
+        echo "net.ipv4.tcp_max_syn_backlog = 4096"
+        
+        if [ "$bbr_supported" = true ]; then
+            echo ""
+            echo "# BBR 拥塞控制"
+            echo "net.core.default_qdisc = fq"
+            echo "net.ipv4.tcp_congestion_control = bbr"
+        else
+            echo ""
+            echo "# BBR 拥塞控制（内核不支持，已禁用）"
+            echo "# net.core.default_qdisc = fq"
+            echo "# net.ipv4.tcp_congestion_control = bbr"
+        fi
+    } > "$sysctl_file"
+    
+    log "sysctl 参数配置成功（已持久化）"
 }
 
 # 创建 systemd 服务
