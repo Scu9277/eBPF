@@ -109,7 +109,9 @@ build_proxy_url() {
         echo "$original_url"
     else
         # 加速地址，构建格式：prefix + / + original_domain + rest_of_url
-        local proxy_url="$prefix/$original_url"
+        # 去掉原始URL中的 https:// 部分
+        local stripped_url=$(echo "$original_url" | sed -E 's|^https?://||')
+        local proxy_url="$prefix/$stripped_url"
         echo "$proxy_url"
     fi
 }
