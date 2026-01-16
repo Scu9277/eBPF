@@ -12,13 +12,11 @@
 #=================================================================================
 
 # --- 脚本配置 (Mihomo 专用) ---
-CONFIG_ZIP_URL="https://gh-proxy.org/github.com/Scu9277/eBPF/releases/download/mihomo/mihomo.zip"
 PLACEHOLDER_IP="10.0.0.121"
+# CONFIG_ZIP_URL 将在选择代理后动态生成
 
 # --- 脚本配置 (Sing-box 专用) ---
-SINGBOX_AMD64_URL="https://gh-proxy.org/github.com/Scu9277/eBPF/releases/download/sing-box/sing-box-1.13.0-beta.1-reF1nd-linux-amd64"
-SINGBOX_AMD64V3_URL="https://gh-proxy.org/github.com/Scu9277/eBPF/releases/download/sing-box/sing-box-1.13.0-beta.1-reF1nd-linux-amd64v3"
-SINGBOX_ARM64_URL="https://gh-proxy.org/github.com/Scu9277/eBPF/releases/download/sing-box/sing-box-1.13.0-beta.1-reF1nd-linux-arm64"
+# SINGBOX URLs 将在选择代理后动态生成
 
 
 # --- 脚本设置 ---
@@ -33,6 +31,99 @@ set -e
 LAN_IP=""
 MIHOMO_ARCH=""
 SINGBOX_ARCH=""
+GITHUB_PROXY=""  # 用户选择的 GitHub 代理
+
+# --- GitHub 代理列表 ---
+declare -a GITHUB_PROXIES=(
+    "https://ghfast.top/"
+    "https://gh-proxy.org/"
+    "https://hk.gh-proxy.org/"
+    "https://cdn.gh-proxy.org/"
+    "https://edgeone.gh-proxy.org/"
+)
+
+declare -a GITHUB_PROXY_NAMES=(
+    "ghfast.top (快速代理)"
+    "gh-proxy.org (主站，全球加速)"
+    "hk.gh-proxy.org (香港，国内优化)"
+    "cdn.gh-proxy.org (Fastly CDN)"
+    "edgeone.gh-proxy.org (EdgeOne，全球加速)"
+)
+
+#=================================================================================
+#   SECTION 0: GitHub 代理选择功能
+#=================================================================================
+
+# 选择 GitHub 代理
+select_github_proxy() {
+    if [ -n "$GITHUB_PROXY" ]; then
+        return 0  # 已经选择过了，跳过
+    fi
+    
+    echo -e "${CYAN}==================================================${NC}"
+    echo -e "${CYAN}    请选择 GitHub 代理 (不同地区速度不同)${NC}"
+    echo -e "${CYAN}==================================================${NC}"
+    echo
+    
+    for i in "${!GITHUB_PROXIES[@]}"; do
+        echo -e "  $((i+1))) ${GREEN}${GITHUB_PROXY_NAMES[$i]}${NC}"
+        echo -e "      ${YELLOW}${GITHUB_PROXIES[$i]}${NC}"
+    done
+    echo
+    echo -e "  0) ${MAGENTA}不使用代理 (直接连接 GitHub)${NC}"
+    echo
+    
+    while true; do
+        read -p "请选择代理 [0-${#GITHUB_PROXIES[@]}]: " proxy_choice
+        
+        if [ "$proxy_choice" == "0" ]; then
+            GITHUB_PROXY=""
+            echo -e "${YELLOW}✅ 已选择：不使用代理${NC}"
+            break
+        elif [ "$proxy_choice" -ge 1 ] && [ "$proxy_choice" -le "${#GITHUB_PROXIES[@]}" ]; then
+            GITHUB_PROXY="${GITHUB_PROXIES[$((proxy_choice-1))]}"
+            echo -e "${GREEN}✅ 已选择：${GITHUB_PROXY_NAMES[$((proxy_choice-1))]}${NC}"
+            break
+        else
+            echo -e "${RED}❌ 无效选项，请重新选择${NC}"
+        fi
+    done
+    echo "----------------------------------------------------------------"
+}
+
+# 将 GitHub URL 转换为使用代理的 URL
+convert_github_url() {
+    local url="$1"
+    
+    # 如果已经使用了代理，直接返回
+    if [[ "$url" == *"gh-proxy.org"* ]] || [[ "$url" == *"ghfast.top"* ]] || [[ "$url" == *"edgeone.gh-proxy.org"* ]]; then
+        echo "$url"
+        return
+    fi
+    
+    # 如果没有选择代理，直接返回原 URL
+    if [ -z "$GITHUB_PROXY" ]; then
+        echo "$url"
+        return
+    fi
+    
+    # 移除代理 URL 末尾的斜杠
+    local proxy_base="${GITHUB_PROXY%/}"
+    
+    # 转换不同类型的 GitHub URL
+    if [[ "$url" == https://github.com/* ]]; then
+        # https://github.com/xxx -> https://proxy/github.com/xxx
+        echo "${url/https:\/\/github.com\//${proxy_base}/github.com/}"
+    elif [[ "$url" == https://raw.githubusercontent.com/* ]]; then
+        # https://raw.githubusercontent.com/xxx -> https://proxy/raw.githubusercontent.com/xxx
+        echo "${url/https:\/\/raw.githubusercontent.com\//${proxy_base}/raw.githubusercontent.com/}"
+    elif [[ "$url" == https://api.github.com/* ]]; then
+        # API 请求通常不需要代理，但也可以代理
+        echo "${url/https:\/\/api.github.com\//${proxy_base}/api.github.com/}"
+    else
+        echo "$url"
+    fi
+}
 
 #=================================================================================
 #   SECTION 1: 核心安装程序 (Core Installers)
@@ -44,11 +135,8 @@ SINGBOX_ARCH=""
 # ----------------------------------------------------------------
 install_mihomo_core_and_config() {
     echo -e "${BLUE}--- 正在安装 [核心 1: Mihomo] ---${NC}"
-    # 1. 检查配置 URL
-    if [ -z "$CONFIG_ZIP_URL" ]; then
-        echo -e "${RED}🛑 错误：Mihomo 的 'CONFIG_ZIP_URL' 未在脚本顶部配置！${NC}"
-        exit 1
-    fi
+    # 1. 生成配置 URL（使用选择的代理）
+    CONFIG_ZIP_URL=$(convert_github_url "https://github.com/Scu9277/eBPF/releases/download/mihomo/mihomo.zip")
 
     # 2. 检查架构
     echo -e "🕵️  正在检测 Mihomo 所需架构..."
@@ -67,15 +155,15 @@ install_mihomo_core_and_config() {
         mihomo -v
     else
         echo -e "📡 正在获取 Mihomo 最新版本号..."
-        API_URL="https://api.github.com/repos/MetaCubeX/mihomo/releases/latest"
-        LATEST_TAG=$(curl -sL $API_URL | jq -r .tag_name)
+        API_URL=$(convert_github_url "https://api.github.com/repos/MetaCubeX/mihomo/releases/latest")
+        LATEST_TAG=$(curl -sL "$API_URL" | jq -r .tag_name)
         if [ -z "$LATEST_TAG" ] || [ "$LATEST_TAG" == "null" ]; then
             echo -e "${RED}❌ 获取 Mihomo 最新版本号失败！${NC}"; exit 1
         fi
         echo -e "${GREEN}🎉 找到最新版本: $LATEST_TAG${NC}"
         DEB_FILENAME="mihomo-linux-${MIHOMO_ARCH}-${LATEST_TAG}.deb"
         DOWNLOAD_URL="https://github.com/MetaCubeX/mihomo/releases/download/${LATEST_TAG}/${DEB_FILENAME}"
-        FAST_DOWNLOAD_URL="https://gh-proxy.org/${DOWNLOAD_URL}"
+        FAST_DOWNLOAD_URL=$(convert_github_url "$DOWNLOAD_URL")
         DEB_PATH="/root/${DEB_FILENAME}"
         echo -e "🚀 正在下载: $FAST_DOWNLOAD_URL"
         wget -O "$DEB_PATH" "$FAST_DOWNLOAD_URL"
@@ -178,16 +266,25 @@ install_singbox_core_and_config() {
     CONFIG_DIR="/etc/sing-box"
     SINGBOX_CORE_PATH="$INSTALL_DIR/sing-box"
     
-    # 从顶部配置获取 URL
+    # 根据架构生成下载 URL（使用选择的代理）
     SINGBOX_DOWNLOAD_URL=""
     case "$SINGBOX_ARCH" in
-        amd64) SINGBOX_DOWNLOAD_URL="$SINGBOX_AMD64_URL" ;;
-        amd64v3) SINGBOX_DOWNLOAD_URL="$SINGBOX_AMD64V3_URL" ;;
-        arm64) SINGBOX_DOWNLOAD_URL="$SINGBOX_ARM64_URL" ;;
+        amd64) 
+            BASE_URL="https://github.com/Scu9277/eBPF/releases/download/sing-box/sing-box-1.13.0-beta.1-reF1nd-linux-amd64"
+            SINGBOX_DOWNLOAD_URL=$(convert_github_url "$BASE_URL")
+            ;;
+        amd64v3) 
+            BASE_URL="https://github.com/Scu9277/eBPF/releases/download/sing-box/sing-box-1.13.0-beta.1-reF1nd-linux-amd64v3"
+            SINGBOX_DOWNLOAD_URL=$(convert_github_url "$BASE_URL")
+            ;;
+        arm64) 
+            BASE_URL="https://github.com/Scu9277/eBPF/releases/download/sing-box/sing-box-1.13.0-beta.1-reF1nd-linux-arm64"
+            SINGBOX_DOWNLOAD_URL=$(convert_github_url "$BASE_URL")
+            ;;
     esac
     
     if [ -z "$SINGBOX_DOWNLOAD_URL" ]; then
-        echo -e "${RED}错误：无法根据架构 $SINGBOX_ARCH 匹配到下载 URL。请检查顶部配置。${NC}"
+        echo -e "${RED}错误：无法根据架构 $SINGBOX_ARCH 生成下载 URL。${NC}"
         exit 1
     fi
 
@@ -208,7 +305,7 @@ install_singbox_core_and_config() {
 
     # 5. 下载配置
     mkdir -p $CONFIG_DIR
-    CONFIG_JSON_URL="https://gh-proxy.org/raw.githubusercontent.com/Scu9277/TProxy/refs/heads/main/sing-box/config.json"
+    CONFIG_JSON_URL=$(convert_github_url "https://raw.githubusercontent.com/Scu9277/TProxy/refs/heads/main/sing-box/config.json")
     echo -e "${YELLOW}正在下载 Sing-box 配置文件...${NC}"
     curl -L -o "$CONFIG_DIR/config.json" "$CONFIG_JSON_URL"
     
@@ -389,7 +486,8 @@ install_substore() {
     if ! docker images -q $IMAGE_NAME | grep -q . ; then
         echo -e "${YELLOW}🔎 未找到 '$IMAGE_NAME' 镜像，正在下载...${NC}"
         echo -e "📦 正在下载 Sub-Store Docker 镜像包..."
-        wget "https://gh-proxy.org/github.com/Scu9277/TProxy/releases/download/1.0/sub-store.tar.gz" -O "/root/sub-store.tar.gz"
+        SUBSTORE_URL=$(convert_github_url "https://github.com/Scu9277/TProxy/releases/download/1.0/sub-store.tar.gz")
+        wget "$SUBSTORE_URL" -O "/root/sub-store.tar.gz"
         echo -e "🗜️ 正在解压并加载镜像..."
         tar -xzf "/root/sub-store.tar.gz" -C "/root/"
         docker load -i "/root/sub-store.tar"
@@ -427,10 +525,10 @@ install_tproxy() {
     echo
     read -p "请输入选项 [1-2]: " t_choice
 
-    case $t_choice in
+        case $t_choice in
         1)
             echo -e "🔧 准备执行 TProxy 脚本 (setup-tproxy-ipv4.sh)..."
-            TPROXY_SCRIPT_URL="https://gh-proxy.org/raw.githubusercontent.com/Scu9277/TProxy/refs/heads/main/Tproxy/setup-tproxy-ipv4.sh"
+            TPROXY_SCRIPT_URL=$(convert_github_url "https://raw.githubusercontent.com/Scu9277/TProxy/refs/heads/main/Tproxy/setup-tproxy-ipv4.sh")
             if bash <(curl -sSL "$TPROXY_SCRIPT_URL"); then
                 echo -e "${GREEN}✅ TProxy 脚本执行完毕！${NC}"
             else
@@ -439,12 +537,13 @@ install_tproxy() {
             ;;
         2)
             echo -e "🐝 准备安装 eBPF TC TProxy..."
-            EBPF_DEPLOY_URL="https://gh-proxy.org/raw.githubusercontent.com/Scu9277/eBPF/refs/heads/main/mihomo/deploy.sh"
+            EBPF_DEPLOY_URL=$(convert_github_url "https://raw.githubusercontent.com/Scu9277/eBPF/refs/heads/main/mihomo/deploy.sh")
             echo -e "📥 正在下载并执行 eBPF TC TProxy 部署脚本..."
             if bash <(curl -sSL "$EBPF_DEPLOY_URL"); then
                 echo -e "${GREEN}✅ eBPF TC TProxy 部署脚本执行完毕！${NC}"
                 echo -e "${YELLOW}💡 提示：你可以运行以下命令检查 TProxy 状态：${NC}"
-                echo -e "   ${CYAN}bash <(curl -sSL https://gh-proxy.org/raw.githubusercontent.com/Scu9277/eBPF/refs/heads/main/mihomo/check_tproxy.sh)${NC}"
+                CHECK_TPROXY_URL=$(convert_github_url "https://raw.githubusercontent.com/Scu9277/eBPF/refs/heads/main/mihomo/check_tproxy.sh")
+                echo -e "   ${CYAN}bash <(curl -sSL $CHECK_TPROXY_URL)${NC}"
             else
                 echo -e "${RED}❌ eBPF TC TProxy 部署失败。${NC}"
             fi
@@ -462,8 +561,8 @@ install_tproxy() {
 install_renetwork() {
     echo -e "${BLUE}--- 正在执行 [组件 6: 配置网卡IP] ---${NC}"
     echo -e "🚀 正在下载并执行 renetwork.sh 脚本..."
-    
-    if bash <(curl -sSL https://gh-proxy.org/raw.githubusercontent.com/Scu9277/TProxy/refs/heads/main/renetwork.sh); then
+    RENETWORK_URL=$(convert_github_url "https://raw.githubusercontent.com/Scu9277/TProxy/refs/heads/main/renetwork.sh")
+    if bash <(curl -sSL "$RENETWORK_URL"); then
         echo -e "${GREEN}✅ 网卡配置脚本执行完毕。${NC}"
     else
         echo -e "${RED}❌ 网卡配置脚本执行失败。${NC}"
@@ -632,8 +731,9 @@ install_reinstall_os() {
     case "$choice" in
         y|Y )
             echo -e "${BLUE}🚀 正在开始重装系统... 你的 SSH 将会断开。${NC}"
+            REINSTALL_URL=$(convert_github_url "https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh")
             echo -e "执行: curl -O ... && bash reinstall.sh debian-13"
-            curl -O https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh && bash reinstall.sh debian-13
+            curl -O "$REINSTALL_URL" && bash reinstall.sh debian-13
             echo -e "${RED}--- 如果你还看得到这条消息，说明脚本执行失败。---${NC}"
             ;;
         * )
@@ -748,4 +848,5 @@ main_menu() {
 # --- 脚本开始执行 ---
 check_root
 check_dependencies
+select_github_proxy  # 让用户选择 GitHub 代理
 main_menu
