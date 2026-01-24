@@ -987,6 +987,79 @@ install_substore() {
 #   组件 5: TProxy
 # ----------------------------------------------------------------
 
+# 检测当前使用的 TProxy 方案
+detect_current_tproxy() {
+    local current_scheme=""
+    local status_info=""
+    
+    # 检测主网卡
+    local MAIN_IF=$(ip -4 route show default 2>/dev/null | grep -o 'dev [^ ]*' | awk '{print $2}' | head -n1)
+    [ -z "$MAIN_IF" ] && MAIN_IF=$(ip -4 link show 2>/dev/null | grep -E '^[0-9]+:' | grep -v 'lo:' | head -n1 | awk -F': ' '{print $2}' | awk '{print $1}')
+    
+    # 1. 检测 iptables TProxy 方案
+    if iptables -t mangle -L TPROXY_CHAIN >/dev/null 2>&1; then
+        local service_status=""
+        if [ "$OS_DIST" == "alpine" ]; then
+            if rc-service tproxy status >/dev/null 2>&1; then
+                service_status="运行中"
+            elif [ -f /etc/init.d/tproxy ]; then
+                service_status="已安装"
+            fi
+        else
+            if systemctl is-active --quiet tproxy.service 2>/dev/null; then
+                service_status="运行中"
+            elif systemctl is-enabled --quiet tproxy.service 2>/dev/null; then
+                service_status="已安装"
+            fi
+        fi
+        
+        if [ -n "$service_status" ]; then
+            current_scheme="iptables"
+            status_info="($service_status)"
+        fi
+    fi
+    
+    # 2. 检测 eBPF TC TProxy v2.0 方案
+    if [ -z "$current_scheme" ]; then
+        local ebpf_service_status=""
+        if [ "$OS_DIST" == "alpine" ]; then
+            if rc-service ebpf-tproxy status >/dev/null 2>&1; then
+                ebpf_service_status="运行中"
+            elif [ -f /etc/init.d/ebpf-tproxy ]; then
+                ebpf_service_status="已安装"
+            fi
+        else
+            if systemctl is-active --quiet ebpf-tproxy.service 2>/dev/null; then
+                ebpf_service_status="运行中"
+            elif systemctl is-enabled --quiet ebpf-tproxy.service 2>/dev/null; then
+                ebpf_service_status="已安装"
+            fi
+        fi
+        
+        # 检查 TC clsact qdisc 或 eBPF 程序
+        if [ -n "$ebpf_service_status" ] || ([ -n "$MAIN_IF" ] && tc qdisc show dev "$MAIN_IF" 2>/dev/null | grep -q "clsact") || [ -f /sys/fs/bpf/tproxy_prog ] || [ -f /etc/ebpf-tc-tproxy/tproxy.sh ]; then
+            current_scheme="ebpf-v2"
+            status_info="($ebpf_service_status)"
+        fi
+    fi
+    
+    # 3. 检测旧版 eBPF TC TProxy 方案（通过检查是否有旧版相关文件或服务）
+    if [ -z "$current_scheme" ]; then
+        # 检查是否有旧版 eBPF 相关的配置文件或服务
+        if [ -f /etc/systemd/system/tproxy-agent.service ] || [ -f /etc/init.d/tproxy-agent ] || [ -d /opt/ebpf-tproxy ]; then
+            current_scheme="ebpf-old"
+            status_info="(已安装)"
+        fi
+    fi
+    
+    # 返回结果
+    if [ -n "$current_scheme" ]; then
+        echo "$current_scheme|$status_info"
+    else
+        echo "none|"
+    fi
+}
+
 # 清理旧的 TProxy 配置
 cleanup_old_tproxy() {
     echo -e "${YELLOW}🧹 正在清理旧的 TProxy 配置...${NC}"
@@ -1078,15 +1151,82 @@ cleanup_old_tproxy() {
 
 install_tproxy() {
     echo -e "${BLUE}--- 正在安装 [组件 5: TProxy] ---${NC}"
+    
+    # 检测当前使用的方案
+    local current_info=$(detect_current_tproxy)
+    local current_scheme=$(echo "$current_info" | cut -d'|' -f1)
+    local status_info=$(echo "$current_info" | cut -d'|' -f2)
+    
+    echo ""
+    if [ "$current_scheme" != "none" ]; then
+        local scheme_name=""
+        case "$current_scheme" in
+            iptables) scheme_name="传统 iptables TProxy" ;;
+            ebpf-v2) scheme_name="高性能 eBPF TC TProxy v2.0" ;;
+            ebpf-old) scheme_name="旧版 eBPF TC TProxy" ;;
+        esac
+        echo -e "${GREEN}📊 当前使用的方案: ${BLUE}$scheme_name${NC} ${status_info}"
+        echo -e "${YELLOW}💡 选择其他方案将自动清理当前配置并切换${NC}"
+        echo ""
+    else
+        echo -e "${YELLOW}ℹ️  当前未检测到已安装的 TProxy 方案${NC}"
+        echo ""
+    fi
+    
     echo "请选择 TProxy 模式:"
-    echo "  1) 传统 iptables TProxy 模式 (setup-tproxy-ipv4.sh)"
-    echo "  2) 高性能 eBPF TC TProxy 模式 v2.0 (自动识别系统/推荐)"
-    echo "  3) 旧版 eBPF TC TProxy 模式 (mihomo/deploy.sh)"
+    case "$current_scheme" in
+        iptables)
+            echo -e "  1) 传统 iptables TProxy 模式 (setup-tproxy-ipv4.sh) ${GREEN}[当前使用]${NC}"
+            echo "  2) 高性能 eBPF TC TProxy 模式 v2.0 (自动识别系统/推荐)"
+            echo "  3) 旧版 eBPF TC TProxy 模式 (mihomo/deploy.sh)"
+            ;;
+        ebpf-v2)
+            echo "  1) 传统 iptables TProxy 模式 (setup-tproxy-ipv4.sh)"
+            echo -e "  2) 高性能 eBPF TC TProxy 模式 v2.0 (自动识别系统/推荐) ${GREEN}[当前使用]${NC}"
+            echo "  3) 旧版 eBPF TC TProxy 模式 (mihomo/deploy.sh)"
+            ;;
+        ebpf-old)
+            echo "  1) 传统 iptables TProxy 模式 (setup-tproxy-ipv4.sh)"
+            echo "  2) 高性能 eBPF TC TProxy 模式 v2.0 (自动识别系统/推荐)"
+            echo -e "  3) 旧版 eBPF TC TProxy 模式 (mihomo/deploy.sh) ${GREEN}[当前使用]${NC}"
+            ;;
+        *)
+            echo "  1) 传统 iptables TProxy 模式 (setup-tproxy-ipv4.sh)"
+            echo "  2) 高性能 eBPF TC TProxy 模式 v2.0 (自动识别系统/推荐)"
+            echo "  3) 旧版 eBPF TC TProxy 模式 (mihomo/deploy.sh)"
+            ;;
+    esac
     echo
     read -p "请输入选项 [1-3]: " t_choice
     
-    # 在安装新方案前，先清理旧配置
-    cleanup_old_tproxy
+    # 检查是否选择了当前使用的方案
+    local selected_scheme=""
+    case $t_choice in
+        1) selected_scheme="iptables" ;;
+        2) selected_scheme="ebpf-v2" ;;
+        3) selected_scheme="ebpf-old" ;;
+    esac
+    
+    if [ "$selected_scheme" = "$current_scheme" ] && [ "$current_scheme" != "none" ]; then
+        echo ""
+        echo -e "${YELLOW}⚠️  您选择的是当前正在使用的方案${NC}"
+        read -p "是否要重新安装此方案？(y/N): " reinstall_confirm
+        if [[ ! "$reinstall_confirm" =~ ^[Yy]$ ]]; then
+            echo -e "${GREEN}👍 操作已取消${NC}"
+            echo "----------------------------------------------------------------"
+            return
+        fi
+        echo ""
+    fi
+    
+    # 在安装新方案前，先清理旧配置（如果选择了不同的方案）
+    if [ "$selected_scheme" != "$current_scheme" ] && [ "$current_scheme" != "none" ]; then
+        cleanup_old_tproxy
+    elif [ "$selected_scheme" = "$current_scheme" ] && [ "$current_scheme" != "none" ]; then
+        # 重新安装当前方案，也需要清理
+        echo -e "${YELLOW}🔄 重新安装当前方案，正在清理旧配置...${NC}"
+        cleanup_old_tproxy
+    fi
 
     case $t_choice in
         1)
