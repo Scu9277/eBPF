@@ -476,10 +476,22 @@ EBPF_OBJECT="$EBPF_DIR/tproxy.bpf.o"
 USE_EBPF="$use_ebpf_flag"
 
 # 查找 iptables 命令的完整路径（确保在脚本中可用）
-IPTABLES_CMD=\$(command -v iptables || echo "/sbin/iptables")
-if [ ! -x "\$IPTABLES_CMD" ]; then
-    IPTABLES_CMD="/usr/sbin/iptables"
+# Alpine 系统中 iptables 通常在 /sbin/iptables
+IPTABLES_CMD=\$(command -v iptables 2>/dev/null)
+if [ -z "\$IPTABLES_CMD" ] || [ ! -x "\$IPTABLES_CMD" ]; then
+    # 尝试常见路径
+    for path in /sbin/iptables /usr/sbin/iptables /usr/local/sbin/iptables; do
+        if [ -x "\$path" ]; then
+            IPTABLES_CMD="\$path"
+            break
+        fi
+    done
+    if [ -z "\$IPTABLES_CMD" ] || [ ! -x "\$IPTABLES_CMD" ]; then
+        log "❌ 错误：无法找到 iptables 命令！"
+        exit 1
+    fi
 fi
+log "✅ 使用 iptables 路径: \$IPTABLES_CMD"
 
 log() {
     echo "[$(date '+%F %T')] \$1" | tee -a "\$LOG_FILE"
