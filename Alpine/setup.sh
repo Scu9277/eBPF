@@ -807,7 +807,7 @@ install_renetwork() {
     echo -e "${BLUE}--- 正在执行 [组件 6: 配置网卡IP] ---${NC}"
     echo -e "🚀 正在下载并执行 renetwork.sh 脚本..."
     
-    RENETWORK_URL="https://raw.githubusercontent.com/Scu9277/TProxy/refs/heads/main/renetwork.sh"
+    RENETWORK_URL="https://raw.githubusercontent.com/Scu9277/eBPF/refs/heads/main/Alpine/renetwork.sh"
     RENETWORK_URL=$(process_github_url "$RENETWORK_URL")
     if bash <(curl -sSL "$RENETWORK_URL"); then
         echo -e "${GREEN}✅ 网卡配置脚本执行完毕。${NC}"
