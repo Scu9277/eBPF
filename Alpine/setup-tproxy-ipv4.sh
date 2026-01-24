@@ -46,9 +46,29 @@ LOG_FILE="/var/log/tproxy-setup.log"
 TPROXY_DIR="/etc/tproxy"
 TPROXY_SCRIPT="$TPROXY_DIR/tproxy.sh"
 TPROXY_PORT=9420
+# 默认 mark 值，如果检测到 mihomo 配置会自动使用其 routing-mark
 TPROXY_MARK=0x2333
 TABLE_ID=100
 DOCKER_PORT=9277
+
+# 检测并同步 mihomo 的 routing-mark
+detect_mihomo_routing_mark() {
+    local mihomo_config="/etc/mihomo/config.yaml"
+    if [ -f "$mihomo_config" ]; then
+        local routing_mark=$(grep -E "^routing-mark:" "$mihomo_config" 2>/dev/null | awk '{print $2}' | tr -d ' ' | head -n1)
+        if [ -n "$routing_mark" ] && [[ "$routing_mark" =~ ^[0-9]+$ ]]; then
+            # 转换为十六进制
+            local mark_hex=$(printf "0x%X" "$routing_mark" 2>/dev/null)
+            if [ -n "$mark_hex" ]; then
+                echo "$mark_hex"
+                return 0
+            fi
+        fi
+    fi
+    # 如果检测失败，返回默认值
+    echo "0x2333"
+    return 1
+}
 
 # --- 作者信息 ---
 AUTHOR_NAME="shangkouyou Duang Scu"
@@ -172,6 +192,17 @@ sysctl -w net.ipv4.ip_forward=1 >/dev/null
 grep -q '^net.ipv4.ip_forward' /etc/sysctl.conf && sed -i '/net.ipv4.ip_forward/d' /etc/sysctl.conf
 echo "net.ipv4.ip_forward = 1" >> /etc/sysctl.conf
 echo "[$(date '+%F %T')] 🔧 已启用 IPv4 转发" | tee -a "$LOG_FILE"
+
+# ---- 检测并同步 mihomo 的 routing-mark ----
+echo "[$(date '+%F %T')] 🔍 正在检测 mihomo 配置中的 routing-mark..." | tee -a "$LOG_FILE"
+local detected_mark=$(detect_mihomo_routing_mark)
+if [ "$detected_mark" != "0x2333" ]; then
+    TPROXY_MARK="$detected_mark"
+    echo "[$(date '+%F %T')] ✅ 检测到 mihomo routing-mark，使用: $TPROXY_MARK" | tee -a "$LOG_FILE"
+else
+    echo "[$(date '+%F %T')] ℹ️  使用默认 TProxy mark: $TPROXY_MARK" | tee -a "$LOG_FILE"
+    echo "[$(date '+%F %T')] 💡 提示：如果 mihomo 使用不同的 routing-mark，请确保配置匹配" | tee -a "$LOG_FILE"
+fi
 
 # ---- 写入 IPv4 TProxy 脚本 ----
 cat > "$TPROXY_SCRIPT" <<EOF

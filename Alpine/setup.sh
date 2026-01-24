@@ -1292,7 +1292,24 @@ install_tproxy() {
             fi
             ;;
         4)
+            # 诊断功能：只检查状态，不修改任何配置
+            # 重新检测当前方案（确保使用最新状态）
+            local current_info=$(detect_current_tproxy)
+            local current_scheme=$(echo "$current_info" | cut -d'|' -f1)
+            local status_info=$(echo "$current_info" | cut -d'|' -f2)
+            
             echo -e "${YELLOW}🔍 正在诊断 TProxy 配置状态...${NC}"
+            if [ "$current_scheme" != "none" ]; then
+                local scheme_name=""
+                case "$current_scheme" in
+                    iptables) scheme_name="传统 iptables TProxy" ;;
+                    ebpf-v2) scheme_name="高性能 eBPF TC TProxy v2.0" ;;
+                    ebpf-old) scheme_name="旧版 eBPF TC TProxy" ;;
+                esac
+                echo -e "${GREEN}📊 当前方案: ${BLUE}$scheme_name${NC} ${status_info}"
+            else
+                echo -e "${YELLOW}ℹ️  当前未检测到已安装的 TProxy 方案${NC}"
+            fi
             echo ""
             
             # 检查内核模块
@@ -1343,10 +1360,28 @@ install_tproxy() {
             # 检查策略路由
             echo ""
             echo -e "${CYAN}4. 策略路由检查:${NC}"
-            if ip rule show | grep -q "fwmark 0x2333"; then
-                echo -e "   ${GREEN}✅ fwmark 0x2333 规则已配置${NC}"
+            # 检测 mihomo 配置中的 routing-mark
+            local mihomo_config="/etc/mihomo/config.yaml"
+            local expected_mark="0x2333"
+            if [ -f "$mihomo_config" ]; then
+                local mihomo_mark=$(grep -E "^routing-mark:" "$mihomo_config" 2>/dev/null | awk '{print $2}' | tr -d ' ' | head -n1)
+                if [ -n "$mihomo_mark" ] && [[ "$mihomo_mark" =~ ^[0-9]+$ ]]; then
+                    expected_mark=$(printf "0x%X" "$mihomo_mark" 2>/dev/null || echo "0x2333")
+                fi
+            fi
+            
+            if ip rule show | grep -q "fwmark $expected_mark"; then
+                echo -e "   ${GREEN}✅ fwmark $expected_mark 规则已配置${NC}"
             else
-                echo -e "   ${RED}❌ fwmark 0x2333 规则未找到！${NC}"
+                echo -e "   ${RED}❌ fwmark $expected_mark 规则未找到！${NC}"
+                # 显示当前配置的 mark
+                local current_mark=$(ip rule show | grep "fwmark" | head -1 | awk '{print $NF}' | cut -d' ' -f1)
+                if [ -n "$current_mark" ]; then
+                    echo -e "   ${YELLOW}   当前配置的 mark: $current_mark${NC}"
+                    if [ "$current_mark" != "$expected_mark" ]; then
+                        echo -e "   ${RED}   ⚠️  mark 值不匹配！这会导致流量无法正确路由${NC}"
+                    fi
+                fi
             fi
             if ip route show table 100 2>/dev/null | grep -q "local default"; then
                 echo -e "   ${GREEN}✅ 路由表 100 已配置${NC}"
@@ -1407,9 +1442,39 @@ install_tproxy() {
             
             echo ""
             
+            # 检查 mihomo 配置中的 routing-mark
+            echo ""
+            echo -e "${CYAN}8. Mihomo 配置检查:${NC}"
+            local mihomo_config="/etc/mihomo/config.yaml"
+            if [ -f "$mihomo_config" ]; then
+                local mihomo_mark=$(grep -E "^routing-mark:" "$mihomo_config" 2>/dev/null | awk '{print $2}' | tr -d ' ')
+                if [ -n "$mihomo_mark" ]; then
+                    echo -e "   ${GREEN}✅ 检测到 mihomo routing-mark: $mihomo_mark${NC}"
+                    # 转换为十六进制
+                    local mihomo_mark_hex=$(printf "0x%X" "$mihomo_mark" 2>/dev/null || echo "")
+                    echo -e "   ${YELLOW}   十六进制: $mihomo_mark_hex${NC}"
+                    
+                    # 检查 TProxy mark 是否匹配
+                    if ip rule show | grep -q "fwmark $mihomo_mark_hex"; then
+                        echo -e "   ${GREEN}✅ TProxy mark 与 mihomo routing-mark 匹配${NC}"
+                    else
+                        echo -e "   ${RED}❌ 警告：TProxy mark 与 mihomo routing-mark 不匹配！${NC}"
+                        local current_mark=$(ip rule show | grep "fwmark" | head -1 | awk '{print $NF}' | cut -d' ' -f1)
+                        echo -e "   ${YELLOW}   当前 TProxy mark: ${current_mark:-"未配置"}${NC}"
+                        echo -e "   ${YELLOW}   mihomo routing-mark: $mihomo_mark ($mihomo_mark_hex)${NC}"
+                        echo -e "   ${RED}   这会导致流量无法正确路由！${NC}"
+                    fi
+                else
+                    echo -e "   ${YELLOW}⚠️  未在 mihomo 配置中找到 routing-mark${NC}"
+                fi
+            else
+                echo -e "   ${YELLOW}⚠️  mihomo 配置文件不存在: $mihomo_config${NC}"
+            fi
+            
             # 检查是否有问题需要修复
             local has_issues=false
-            if ! ip rule show | grep -q "fwmark 0x2333" || ! ip route show table 100 2>/dev/null | grep -q "local default"; then
+            # 检查策略路由（支持多种 mark 值）
+            if ! ip rule show | grep -qE "fwmark (0x2333|0x23B3|9139|9011)" || ! ip route show table 100 2>/dev/null | grep -q "local default"; then
                 has_issues=true
             fi
             
@@ -1428,11 +1493,21 @@ install_tproxy() {
                     modprobe xt_TPROXY 2>/dev/null || true
                     modprobe nf_tproxy_ipv4 2>/dev/null || true
                     
+                    # 检测正确的 mark 值（优先使用 mihomo 配置）
+                    local fix_mark="0x2333"
+                    if [ -f "/etc/mihomo/config.yaml" ]; then
+                        local mihomo_mark=$(grep -E "^routing-mark:" /etc/mihomo/config.yaml 2>/dev/null | awk '{print $2}' | tr -d ' ' | head -n1)
+                        if [ -n "$mihomo_mark" ] && [[ "$mihomo_mark" =~ ^[0-9]+$ ]]; then
+                            fix_mark=$(printf "0x%X" "$mihomo_mark" 2>/dev/null || echo "0x2333")
+                            echo -e "${GREEN}   使用 mihomo 配置的 routing-mark: $mihomo_mark ($fix_mark)${NC}"
+                        fi
+                    fi
+                    
                     # 修复策略路由
-                    echo -e "${YELLOW}  - 修复策略路由...${NC}"
-                    ip rule del fwmark 0x2333 table 100 2>/dev/null || true
+                    echo -e "${YELLOW}  - 修复策略路由 (使用 mark: $fix_mark)...${NC}"
+                    ip rule del fwmark "$fix_mark" table 100 2>/dev/null || true
                     ip route flush table 100 2>/dev/null || true
-                    if ip rule add fwmark 0x2333 table 100 2>/dev/null; then
+                    if ip rule add fwmark "$fix_mark" table 100 2>/dev/null; then
                         echo -e "${GREEN}    ✅ 策略路由规则已添加${NC}"
                     else
                         echo -e "${RED}    ❌ 策略路由规则添加失败${NC}"

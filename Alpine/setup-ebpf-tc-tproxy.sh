@@ -53,10 +53,30 @@ LOG_FILE="/var/log/ebpf-tc-tproxy.log"
 EBPF_DIR="/etc/ebpf-tc-tproxy"
 EBPF_SCRIPT="$EBPF_DIR/tproxy.sh"
 TPROXY_PORT=9420
+# 默认 mark 值，如果检测到 mihomo 配置会自动使用其 routing-mark
 TPROXY_MARK=0x2333
 TABLE_ID=100
 DOCKER_PORT=9277
 MAIN_INTERFACE=""
+
+# 检测并同步 mihomo 的 routing-mark
+detect_mihomo_routing_mark() {
+    local mihomo_config="/etc/mihomo/config.yaml"
+    if [ -f "$mihomo_config" ]; then
+        local routing_mark=$(grep -E "^routing-mark:" "$mihomo_config" 2>/dev/null | awk '{print $2}' | tr -d ' ' | head -n1)
+        if [ -n "$routing_mark" ] && [[ "$routing_mark" =~ ^[0-9]+$ ]]; then
+            # 转换为十六进制
+            local mark_hex=$(printf "0x%X" "$routing_mark" 2>/dev/null)
+            if [ -n "$mark_hex" ]; then
+                echo "$mark_hex"
+                return 0
+            fi
+        fi
+    fi
+    # 如果检测失败，返回默认值
+    echo "0x2333"
+    return 1
+}
 
 # --- 系统检测 ---
 detect_os() {
@@ -323,92 +343,13 @@ compile_ebpf() {
     
     echo -e "${YELLOW}🔨 正在编译 eBPF 程序...${NC}"
     
-    # 创建 eBPF 源代码（第一个版本，可能被覆盖）
-    cat > "$ebpf_source" <<'EOFBPF'
-#include <linux/bpf.h>
-#include <linux/pkt_cls.h>
-#include <linux/in.h>
-#include <linux/ip.h>
-#include <linux/ipv6.h>
-#include <linux/tcp.h>
-#include <linux/udp.h>
-#include <bpf/bpf_helpers.h>
-#include <bpf/bpf_endian.h>
-
-#ifndef TC_ACT_OK
-#define TC_ACT_OK 0
-#endif
-
-#define TPROXY_PORT 9420
-#define TPROXY_MARK 0x2333
-
-struct {
-    __uint(type, BPF_MAP_TYPE_ARRAY);
-    __uint(max_entries, 1);
-    __type(key, __u32);
-    __type(value, __u32);
-} port_map SEC(".maps");
-
-SEC("tc")
-int tproxy_redirect(struct __sk_buff *skb) {
-    void *data = (void *)(long)skb->data;
-    void *data_end = (void *)(long)skb->data_end;
-    
-    struct iphdr *ip = data;
-    if (data + sizeof(*ip) > data_end)
-        return TC_ACT_OK;
-    
-    // 跳过本地回环和局域网
-    if (ip->saddr == 0x0100007f || // 127.0.0.1
-        (ip->daddr & 0xff000000) == 0x0a000000 || // 10.0.0.0/8
-        (ip->daddr & 0xff000000) == 0xc0a80000 || // 192.168.0.0/16
-        (ip->daddr & 0xfff00000) == 0xac100000)    // 172.16.0.0/12
-        return TC_ACT_OK;
-    
-    // 获取端口配置
-    __u32 key = 0;
-    __u32 *port = bpf_map_lookup_elem(&port_map, &key);
-    if (!port)
-        return TC_ACT_OK;
-    
-    // 处理 TCP
-    if (ip->protocol == IPPROTO_TCP) {
-        struct tcphdr *tcp = (struct tcphdr *)(ip + 1);
-        if ((void *)(tcp + 1) > data_end)
-            return TC_ACT_OK;
-        
-        // 重定向到 TProxy 端口
-        if (bpf_skb_change_proto(skb, 0, 0) == 0) {
-            skb->mark = TPROXY_MARK;
-            return bpf_redirect(TPROXY_PORT, 0);
-        }
-    }
-    
-    // 处理 UDP
-    if (ip->protocol == IPPROTO_UDP) {
-        struct udphdr *udp = (struct udphdr *)(ip + 1);
-        if ((void *)(udp + 1) > data_end)
-            return TC_ACT_OK;
-        
-        // 重定向到 TProxy 端口
-        if (bpf_skb_change_proto(skb, 0, 0) == 0) {
-            skb->mark = TPROXY_MARK;
-            return bpf_redirect(TPROXY_PORT, 0);
-        }
-    }
-    
-    return TC_ACT_OK;
-}
-
-char _license[] SEC("license") = "GPL";
-EOFBPF
-    
-    # 编译 eBPF 程序
-    local kernel_version=$(uname -r | cut -d- -f1)
-    local clang_flags="-O2 -target bpf -D__BPF_TRACING__ -I/usr/include -I/usr/include/bpf"
+    # 将 mark 值转换为十进制用于 eBPF 代码
+    # bash 的 $((0x23B3)) 可以正确转换为十进制
+    local mark_decimal=$((TPROXY_MARK))
+    echo -e "${YELLOW}   使用 mark 值: $TPROXY_MARK (十进制: $mark_decimal)${NC}"
     
     # 简化版 eBPF 程序（仅标记，实际重定向由 TC 完成）
-    cat > "$ebpf_source" <<'EOFBPF'
+    cat > "$ebpf_source" <<EOFBPF
 #include <linux/bpf.h>
 #include <linux/pkt_cls.h>
 #include <linux/in.h>
@@ -422,7 +363,7 @@ EOFBPF
 #define TC_ACT_OK 0
 #endif
 
-#define TPROXY_MARK 0x2333
+#define TPROXY_MARK $mark_decimal
 
 SEC("tc")
 int tproxy_mark(struct __sk_buff *skb) {
@@ -819,6 +760,18 @@ main() {
     
     install_dependencies
     detect_interface
+    
+    # 检测并同步 mihomo 的 routing-mark
+    echo -e "${YELLOW}🔍 正在检测 mihomo 配置中的 routing-mark...${NC}"
+    local detected_mark=$(detect_mihomo_routing_mark)
+    if [ "$detected_mark" != "0x2333" ]; then
+        TPROXY_MARK="$detected_mark"
+        echo -e "${GREEN}✅ 检测到 mihomo routing-mark，使用: $TPROXY_MARK${NC}"
+    else
+        echo -e "${YELLOW}ℹ️  使用默认 TProxy mark: $TPROXY_MARK${NC}"
+        echo -e "${YELLOW}💡 提示：如果 mihomo 使用不同的 routing-mark，请确保配置匹配${NC}"
+    fi
+    echo ""
     
     # 创建目录
     mkdir -p "$EBPF_DIR"
