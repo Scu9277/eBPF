@@ -1,0 +1,315 @@
+#!/bin/bash
+
+# ==============================
+# 网络配置助手（支持 Debian/Ubuntu/Alpine）
+# 功能: DHCP -> 静态IP交互式配置 + IP检查 + 自动应用检测
+# 作者: shangkouyou Duang Scu
+# 版本: v1.1 (Alpine Support)
+# ==============================
+
+# 检查是否为 bash
+if [ -z "$BASH_VERSION" ]; then
+    if [ -f /etc/alpine-release ]; then
+        apk add --no-cache bash >/dev/null 2>&1
+        exec bash "$0" "$@"
+    else
+        echo "此脚本需要 bash 环境，请使用 'bash $0' 执行"
+        exit 1
+    fi
+fi
+
+# --- 颜色定义 ---
+GREEN="\033[32m"
+YELLOW="\033[33m"
+RED="\033[31m"
+BLUE="\033[34m"
+CYAN="\033[36m"
+NC="\033[0m"
+
+# --- 作者信息 ---
+AUTHOR_NAME="shangkouyou Duang Scu"
+AUTHOR_WECHAT="shangkouyou"
+AUTHOR_EMAIL="shangkouyou@gmail.com"
+AFF_URL="https://aff.scu.indevs.in/"
+PROJECT_NAME="网络配置助手"
+
+# 展示 Logo
+show_logo() {
+    clear
+    echo -e "${CYAN}"
+    echo " ▗▄▄▖▗▖ ▗▖ ▗▄▖ ▗▖  ▗▖ ▗▄▄▖▗▖ ▗▖ ▗▄▖ ▗▖ ▗▖▗▖  ▗▖▗▄▖ ▗▖ ▗▖"
+    echo "▐▌   ▐▌ ▐▌▐▌ ▐▌▐▛▚▖▐▌▐▌   ▐▌▗▞▘▐▌ ▐▌▐▌ ▐▌ ▝▚▞▘▐▌ ▐▌▐▌ ▐▌"
+    echo " ▝▀▚▖▐▛▀▜▌▐▛▀▜▌▐▌ ▝▜▌▐▌▝▜▌▐▛▚▖ ▐▌ ▐▌▐▌ ▐▌  ▐▌ ▐▌ ▐▌▐▌ ▐▌"
+    echo "▗▄▄▞▘▐▌ ▐▌▐▌ ▐▌▐▌  ▐▌▝▚▄▞▘▐▌ ▐▌▝▚▄▞▘▝▚▄▞▘  ▐▌ ▝▚▄▞▘▝▚▄▞▘"
+    echo -e "${NC}"
+    echo "=================================================="
+    echo -e "     项目: ${BLUE}${PROJECT_NAME}${NC}"
+    echo -e "     作者: ${GREEN}${AUTHOR_NAME}${NC}"
+    echo -e "     微信: ${GREEN}${AUTHOR_WECHAT}${NC} | 邮箱: ${GREEN}${AUTHOR_EMAIL}${NC}"
+    echo -e "     服务器 AFF 推荐 (Scu 导航站): ${YELLOW}${AFF_URL}${NC}"
+    echo "=================================================="
+    echo ""
+}
+
+# 检测系统类型
+OS_DIST="unknown"
+if [ -f /etc/alpine-release ]; then
+    OS_DIST="alpine"
+elif [ -f /etc/debian_version ]; then
+    OS_DIST="debian"
+elif [ -f /etc/redhat-release ]; then
+    OS_DIST="redhat"
+fi
+
+NETPLAN_FILE="/etc/network/interfaces"
+
+# 显示 Logo 和系统信息
+show_logo
+echo -e "${GREEN}检测到系统类型: ${BLUE}${OS_DIST}${NC}"
+echo ""
+
+# 检测活跃网卡
+echo -e "${GREEN}检测当前活跃网络接口...${NC}"
+interfaces=($(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | grep -v lo))
+active_interfaces=()
+for iface in "${interfaces[@]}"; do
+    if ip addr show "$iface" 2>/dev/null | grep -q "inet "; then
+        active_interfaces+=("$iface")
+    fi
+done
+
+if [ ${#active_interfaces[@]} -eq 0 ]; then
+    echo -e "${RED}未检测到活跃网络接口，退出.${NC}"
+    exit 1
+fi
+
+echo -e "${YELLOW}活跃网络接口列表:${NC}"
+for i in "${!active_interfaces[@]}"; do
+    echo "$i) ${active_interfaces[$i]}"
+done
+
+read -rp "请选择要修改的网卡编号: " iface_index
+iface="${active_interfaces[$iface_index]}"
+echo -e "${GREEN}您选择的网卡是: $iface${NC}"
+
+# 交互式输入 IP
+while true; do
+    read -rp "请输入静态IP地址 (例如 192.168.1.100): " static_ip
+    [[ -z "$static_ip" ]] && echo -e "${RED}IP不能为空${NC}" && continue
+
+    # IP 格式验证
+    function validate_ip() {
+        local ip=$1
+        if [[ $ip =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+            for i in $(echo $ip | tr '.' ' '); do
+                if ((i < 0 || i > 255)); then
+                    return 1
+                fi
+            done
+            return 0
+        else
+            return 1
+        fi
+    }
+
+    if ! validate_ip "$static_ip"; then
+        echo -e "${RED}IP格式不正确${NC}"
+        continue
+    fi
+
+    # 检测 IP 是否被占用（兼容不同系统的 ping 参数）
+    if command -v ping >/dev/null 2>&1; then
+        if ping -c 1 -W 1 "$static_ip" &> /dev/null 2>&1 || ping -c 1 -w 1 "$static_ip" &> /dev/null 2>&1; then
+            echo -e "${RED}IP $static_ip 已被占用，请选择其他 IP${NC}"
+            continue
+        fi
+    fi
+    break
+done
+
+read -rp "请输入子网掩码位数 [默认24]: " netmask
+netmask=${netmask:-24}
+read -rp "请输入网关地址 (可选): " gateway
+if [ -n "$gateway" ] && ! validate_ip "$gateway"; then
+    echo -e "${RED}网关格式不正确，忽略网关设置${NC}"
+    gateway=""
+fi
+read -rp "请输入首选DNS [默认 119.29.29.29]: " dns1
+dns1=${dns1:-119.29.29.29}
+read -rp "请输入备用DNS [默认 8.8.8.8]: " dns2
+dns2=${dns2:-8.8.8.8}
+
+# 显示配置预览
+echo -e "${YELLOW}配置预览:${NC}"
+echo "网卡: $iface"
+echo "IP: $static_ip/$netmask"
+echo "网关: $gateway"
+echo "DNS: $dns1 $dns2"
+
+read -rp "确认无误后才应用配置，是否继续？[y/N]: " confirm
+[[ ! "$confirm" =~ ^[Yy]$ ]] && echo "取消操作" && exit 0
+
+# 备份原始配置
+backup_file="${NETPLAN_FILE}.bak.$(date +%F_%T)"
+if [ -f "$NETPLAN_FILE" ]; then
+    cp "$NETPLAN_FILE" "$backup_file"
+    echo -e "${GREEN}已备份原配置: $backup_file${NC}"
+else
+    echo -e "${YELLOW}原配置文件不存在，将创建新配置${NC}"
+    # 确保目录存在
+    mkdir -p "$(dirname "$NETPLAN_FILE")"
+fi
+
+# 生成新配置
+cat > "$NETPLAN_FILE" <<EOL
+auto lo
+iface lo inet loopback
+
+allow-hotplug $iface
+iface $iface inet static
+    address $static_ip/$netmask
+EOL
+
+[ -n "$gateway" ] && echo "    gateway $gateway" >> "$NETPLAN_FILE"
+echo "    dns-nameservers $dns1 $dns2" >> "$NETPLAN_FILE"
+echo "iface $iface inet6 auto" >> "$NETPLAN_FILE"
+
+# 同时更新 /etc/resolv.conf（Alpine 和部分系统需要）
+if [ "$OS_DIST" == "alpine" ] || [ ! -f /etc/resolv.conf.head ]; then
+    # 备份 resolv.conf
+    if [ -f /etc/resolv.conf ]; then
+        cp /etc/resolv.conf /etc/resolv.conf.bak.$(date +%F_%T) 2>/dev/null || true
+    fi
+    # 更新 DNS（如果 networking 服务没有自动处理）
+    echo "# Generated by renetwork.sh" > /etc/resolv.conf
+    echo "nameserver $dns1" >> /etc/resolv.conf
+    echo "nameserver $dns2" >> /etc/resolv.conf
+    echo -e "${GREEN}已更新 DNS 配置${NC}"
+fi
+
+# 应用配置
+echo -e "${YELLOW}应用配置并重启网卡...${NC}"
+
+# 根据系统类型使用不同的方式重启网络
+if [ "$OS_DIST" == "alpine" ]; then
+    # Alpine 系统：使用 ip 命令直接配置，然后重启 networking 服务
+    echo -e "${YELLOW}正在配置网卡 $iface...${NC}"
+    
+    # 先删除现有 IP（如果存在）
+    current_ip=$(ip -4 addr show "$iface" 2>/dev/null | grep "inet " | awk '{print $2}' | cut -d/ -f1)
+    if [ -n "$current_ip" ]; then
+        ip addr del "$current_ip/$(ip -4 addr show "$iface" | grep "inet " | awk '{print $2}' | cut -d/ -f2)" dev "$iface" 2>/dev/null || true
+    fi
+    
+    # 添加新 IP
+    ip addr add "$static_ip/$netmask" dev "$iface" 2>/dev/null || true
+    
+    # 配置网关（如果提供）
+    if [ -n "$gateway" ]; then
+        # 删除旧网关
+        ip route del default 2>/dev/null || true
+        # 添加新网关
+        ip route add default via "$gateway" dev "$iface" 2>/dev/null || true
+    fi
+    
+    # 重启 networking 服务（OpenRC）
+    if command -v rc-service >/dev/null 2>&1; then
+        rc-service networking restart 2>/dev/null || true
+    elif command -v service >/dev/null 2>&1; then
+        service networking restart 2>/dev/null || true
+    fi
+    
+    sleep 3
+else
+    # Debian/Ubuntu 系统：使用 ifup/ifdown
+    if command -v ifdown >/dev/null 2>&1 && command -v ifup >/dev/null 2>&1; then
+        if ip link show "$iface" | grep -q "state UP"; then
+            ifdown "$iface" 2>/dev/null || true
+        fi
+        ifup "$iface" 2>/dev/null || true
+    else
+        # 如果没有 ifup/ifdown，使用 ip 命令
+        current_ip=$(ip -4 addr show "$iface" 2>/dev/null | grep "inet " | awk '{print $2}' | cut -d/ -f1)
+        if [ -n "$current_ip" ]; then
+            ip addr del "$current_ip/$(ip -4 addr show "$iface" | grep "inet " | awk '{print $2}' | cut -d/ -f2)" dev "$iface" 2>/dev/null || true
+        fi
+        ip addr add "$static_ip/$netmask" dev "$iface" 2>/dev/null || true
+        if [ -n "$gateway" ]; then
+            ip route del default 2>/dev/null || true
+            ip route add default via "$gateway" dev "$iface" 2>/dev/null || true
+        fi
+    fi
+    
+    # 检查 IP 是否生效
+    if ! ip addr show "$iface" | grep -q "$static_ip"; then
+        echo -e "${YELLOW}尝试重启 networking 服务...${NC}"
+        if command -v systemctl >/dev/null 2>&1; then
+            systemctl restart networking 2>/dev/null || systemctl restart NetworkManager 2>/dev/null || true
+        elif command -v service >/dev/null 2>&1; then
+            service networking restart 2>/dev/null || true
+        fi
+        sleep 2
+    fi
+fi
+
+# 检查 IP 是否生效
+if ip addr show "$iface" | grep -q "$static_ip"; then
+    echo -e "${GREEN}网卡 $iface 已成功应用新 IP: $static_ip${NC}"
+else
+    echo -e "${YELLOW}配置已写入，但 IP 可能尚未生效${NC}"
+    if [ "$OS_DIST" == "alpine" ]; then
+        echo -e "${YELLOW}Alpine 系统提示：${NC}"
+        echo -e "  - 如果网络未立即生效，请尝试: ${GREEN}rc-service networking restart${NC}"
+        echo -e "  - 或者重启系统以确保配置生效"
+        echo -e "  - 配置文件已保存至: ${GREEN}$NETPLAN_FILE${NC}"
+    else
+        echo -e "${YELLOW}提示：您可能需要手动重启网络服务或重启系统${NC}"
+    fi
+fi
+
+# 网络连通性检测
+ping_target=${gateway:-"8.8.8.8"}
+network_ok=false
+
+if command -v ping >/dev/null 2>&1; then
+    if ping -c 3 -W 2 "$ping_target" &> /dev/null 2>&1 || ping -c 3 -w 2 "$ping_target" &> /dev/null 2>&1; then
+        echo -e "${GREEN}网络通畅: $ping_target 可达${NC}"
+        network_ok=true
+    else
+        echo -e "${RED}网络不通: $ping_target 不可达${NC}"
+    fi
+else
+    echo -e "${YELLOW}未找到 ping 命令，跳过网络连通性检测${NC}"
+    network_ok=true  # 如果没有 ping，假设网络正常
+fi
+
+if [ "$network_ok" = false ]; then
+    read -rp "是否回滚配置？[y/N]: " rollback
+    if [[ "$rollback" =~ ^[Yy]$ ]]; then
+        if [ -f "$backup_file" ]; then
+            cp "$backup_file" "$NETPLAN_FILE"
+            echo -e "${GREEN}已恢复配置文件${NC}"
+            
+            # 重启网络服务
+            if [ "$OS_DIST" == "alpine" ]; then
+                if command -v rc-service >/dev/null 2>&1; then
+                    rc-service networking restart 2>/dev/null || true
+                elif command -v service >/dev/null 2>&1; then
+                    service networking restart 2>/dev/null || true
+                fi
+            else
+                if command -v ifdown >/dev/null 2>&1 && command -v ifup >/dev/null 2>&1; then
+                    ifdown "$iface" 2>/dev/null || true
+                    ifup "$iface" 2>/dev/null || true
+                elif command -v systemctl >/dev/null 2>&1; then
+                    systemctl restart networking 2>/dev/null || systemctl restart NetworkManager 2>/dev/null || true
+                fi
+            fi
+            echo -e "${GREEN}已回滚原配置${NC}"
+        else
+            echo -e "${RED}备份文件不存在，无法回滚${NC}"
+        fi
+    fi
+fi
+
+echo -e "${GREEN}操作完成${NC}"
