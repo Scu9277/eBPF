@@ -475,6 +475,12 @@ MAIN_IF="$MAIN_INTERFACE"
 EBPF_OBJECT="$EBPF_DIR/tproxy.bpf.o"
 USE_EBPF="$use_ebpf_flag"
 
+# 查找 iptables 命令的完整路径（确保在脚本中可用）
+IPTABLES_CMD=\$(command -v iptables || echo "/sbin/iptables")
+if [ ! -x "\$IPTABLES_CMD" ]; then
+    IPTABLES_CMD="/usr/sbin/iptables"
+fi
+
 log() {
     echo "[$(date '+%F %T')] \$1" | tee -a "\$LOG_FILE"
 }
@@ -545,12 +551,12 @@ fi
 log "🔗 配置 iptables TProxy 规则..."
 
 # 清理旧规则
-iptables -t mangle -D PREROUTING -j TPROXY_CHAIN 2>/dev/null || true
-iptables -t mangle -F TPROXY_CHAIN 2>/dev/null || true
-iptables -t mangle -X TPROXY_CHAIN 2>/dev/null || true
+\$IPTABLES_CMD -t mangle -D PREROUTING -j TPROXY_CHAIN 2>/dev/null || true
+\$IPTABLES_CMD -t mangle -F TPROXY_CHAIN 2>/dev/null || true
+\$IPTABLES_CMD -t mangle -X TPROXY_CHAIN 2>/dev/null || true
 
 # 创建新链
-iptables -t mangle -N TPROXY_CHAIN 2>/dev/null || true
+\$IPTABLES_CMD -t mangle -N TPROXY_CHAIN 2>/dev/null || true
 
 # ⚠️ 重要：即使使用 eBPF，也要在 iptables 中添加豁免规则，确保宿主机流量不被拦截
 # 如果使用 eBPF，只需要处理已标记的数据包（eBPF 已经处理了豁免规则）
@@ -559,53 +565,53 @@ if [ "\$USE_EBPF" = "true" ]; then
     # eBPF 模式：添加豁免规则 + 处理已标记的数据包
     # 1. 优先豁免宿主机自己的流量（源地址是宿主机 IP）
     if [ -n "\$MAIN_IP" ]; then
-        iptables -t mangle -A TPROXY_CHAIN -s \$MAIN_IP -j RETURN
-        iptables -t mangle -A TPROXY_CHAIN -d \$MAIN_IP -j RETURN
+        \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -s \$MAIN_IP -j RETURN
+        \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -d \$MAIN_IP -j RETURN
     fi
     # 2. 豁免本地回环
-    iptables -t mangle -A TPROXY_CHAIN -d 127.0.0.0/8 -j RETURN
+    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -d 127.0.0.0/8 -j RETURN
     # 3. 豁免局域网
-    iptables -t mangle -A TPROXY_CHAIN -d 192.168.0.0/16 -j RETURN
-    iptables -t mangle -A TPROXY_CHAIN -d 10.0.0.0/8 -j RETURN
-    iptables -t mangle -A TPROXY_CHAIN -d 172.16.0.0/12 -j RETURN
+    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -d 192.168.0.0/16 -j RETURN
+    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -d 10.0.0.0/8 -j RETURN
+    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -d 172.16.0.0/12 -j RETURN
     # 4. 豁免 Docker 端口
-    iptables -t mangle -A TPROXY_CHAIN -p tcp --dport \$DOCKER_PORT -j RETURN
-    iptables -t mangle -A TPROXY_CHAIN -p udp --dport \$DOCKER_PORT -j RETURN
+    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp --dport \$DOCKER_PORT -j RETURN
+    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p udp --dport \$DOCKER_PORT -j RETURN
     # 5. 处理已标记的数据包（eBPF 标记的）
-    iptables -t mangle -A TPROXY_CHAIN -m mark --mark \$TPROXY_MARK -p tcp -j TPROXY --on-port \$TPROXY_PORT --tproxy-mark \$TPROXY_MARK
-    iptables -t mangle -A TPROXY_CHAIN -m mark --mark \$TPROXY_MARK -p udp -j TPROXY --on-port \$TPROXY_PORT --tproxy-mark \$TPROXY_MARK
+    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -m mark --mark \$TPROXY_MARK -p tcp -j TPROXY --on-port \$TPROXY_PORT --tproxy-mark \$TPROXY_MARK
+    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -m mark --mark \$TPROXY_MARK -p udp -j TPROXY --on-port \$TPROXY_PORT --tproxy-mark \$TPROXY_MARK
     log "✅ eBPF + iptables TProxy 规则配置完成（包含宿主机豁免规则）"
 else
     # iptables 模式：完整的规则链（包含豁免规则）
     # 优化规则顺序：最常用的规则优先（提升性能）
     # 1. 豁免 Docker 订阅端口（最常用，最高优先级）
-    iptables -t mangle -A TPROXY_CHAIN -p tcp --dport \$DOCKER_PORT -j RETURN
-    iptables -t mangle -A TPROXY_CHAIN -p udp --dport \$DOCKER_PORT -j RETURN
+    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp --dport \$DOCKER_PORT -j RETURN
+    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p udp --dport \$DOCKER_PORT -j RETURN
     
     # 2. 豁免本地回环（127.0.0.0/8，最常用）
-    iptables -t mangle -A TPROXY_CHAIN -d 127.0.0.0/8 -j RETURN
+    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -d 127.0.0.0/8 -j RETURN
     
     # 3. 豁免局域网网段（按使用频率排序）
-    iptables -t mangle -A TPROXY_CHAIN -d 192.168.0.0/16 -j RETURN
-    iptables -t mangle -A TPROXY_CHAIN -d 10.0.0.0/8 -j RETURN
-    iptables -t mangle -A TPROXY_CHAIN -d 172.16.0.0/12 -j RETURN
+    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -d 192.168.0.0/16 -j RETURN
+    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -d 10.0.0.0/8 -j RETURN
+    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -d 172.16.0.0/12 -j RETURN
     
     # 4. 豁免广播地址
-    iptables -t mangle -A TPROXY_CHAIN -d 255.255.255.255 -j RETURN
+    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -d 255.255.255.255 -j RETURN
     
     # 5. 豁免服务器本身的 IP（如果检测到）
     if [ -n "\$MAIN_IP" ]; then
-        iptables -t mangle -A TPROXY_CHAIN -d \$MAIN_IP -j RETURN
+        \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -d \$MAIN_IP -j RETURN
     fi
     
     # 6. TProxy 转发规则（最后匹配，作为默认规则）
-    iptables -t mangle -A TPROXY_CHAIN -p tcp -j TPROXY --on-port \$TPROXY_PORT --tproxy-mark \$TPROXY_MARK
-    iptables -t mangle -A TPROXY_CHAIN -p udp -j TPROXY --on-port \$TPROXY_PORT --tproxy-mark \$TPROXY_MARK
+    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp -j TPROXY --on-port \$TPROXY_PORT --tproxy-mark \$TPROXY_MARK
+    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p udp -j TPROXY --on-port \$TPROXY_PORT --tproxy-mark \$TPROXY_MARK
     log "✅ iptables TProxy 规则配置完成"
 fi
 
 # Hook 到 PREROUTING（无论使用 eBPF 还是 iptables）
-iptables -t mangle -I PREROUTING -j TPROXY_CHAIN
+\$IPTABLES_CMD -t mangle -I PREROUTING -j TPROXY_CHAIN
 
 # 配置策略路由
 log "🛣️  正在配置策略路由..."
@@ -669,9 +675,9 @@ if [ "\$USE_EBPF" = "true" ]; then
         log "⚠️  eBPF 程序可能未正确加载"
     fi
 else
-    if iptables -t mangle -L TPROXY_CHAIN >/dev/null 2>&1; then
+    if \$IPTABLES_CMD -t mangle -L TPROXY_CHAIN >/dev/null 2>&1; then
         log "✅ iptables TPROXY_CHAIN 规则已创建"
-        if iptables -t mangle -L PREROUTING -n | grep -q "TPROXY_CHAIN"; then
+        if \$IPTABLES_CMD -t mangle -L PREROUTING -n | grep -q "TPROXY_CHAIN"; then
             log "✅ iptables PREROUTING 跳转规则已配置"
         else
             log "❌ 警告：iptables PREROUTING 跳转规则未找到！"
