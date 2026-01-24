@@ -1173,7 +1173,7 @@ install_tproxy() {
         echo ""
     fi
     
-    echo "请选择 TProxy 模式:"
+    echo "请选择操作:"
     case "$current_scheme" in
         iptables)
             echo -e "  1) 传统 iptables TProxy 模式 (setup-tproxy-ipv4.sh) ${GREEN}[当前使用]${NC}"
@@ -1196,8 +1196,9 @@ install_tproxy() {
             echo "  3) 旧版 eBPF TC TProxy 模式 (mihomo/deploy.sh)"
             ;;
     esac
+    echo "  4) 诊断当前 TProxy 配置状态"
     echo
-    read -p "请输入选项 [1-3]: " t_choice
+    read -p "请输入选项 [1-4]: " t_choice
     
     # 检查是否选择了当前使用的方案
     local selected_scheme=""
@@ -1283,6 +1284,123 @@ install_tproxy() {
             else
                 echo -e "${RED}❌ 旧版 eBPF TC TProxy 部署失败。${NC}"
             fi
+            ;;
+        4)
+            echo -e "${YELLOW}🔍 正在诊断 TProxy 配置状态...${NC}"
+            echo ""
+            
+            # 检查内核模块
+            echo -e "${CYAN}1. 内核模块检查:${NC}"
+            if lsmod | grep -q "xt_TPROXY"; then
+                echo -e "   ${GREEN}✅ xt_TPROXY 模块已加载${NC}"
+            else
+                echo -e "   ${RED}❌ xt_TPROXY 模块未加载${NC}"
+                echo -e "   ${YELLOW}   尝试加载: modprobe xt_TPROXY${NC}"
+                modprobe xt_TPROXY 2>/dev/null && echo -e "   ${GREEN}✅ 模块加载成功${NC}" || echo -e "   ${RED}❌ 模块加载失败${NC}"
+            fi
+            
+            # 检查 iptables 规则
+            echo ""
+            echo -e "${CYAN}2. iptables 规则检查:${NC}"
+            if iptables -t mangle -L TPROXY_CHAIN >/dev/null 2>&1; then
+                echo -e "   ${GREEN}✅ TPROXY_CHAIN 链存在${NC}"
+                if iptables -t mangle -L PREROUTING -n | grep -q "TPROXY_CHAIN"; then
+                    echo -e "   ${GREEN}✅ PREROUTING 跳转规则已配置${NC}"
+                else
+                    echo -e "   ${RED}❌ PREROUTING 跳转规则未找到！${NC}"
+                fi
+                echo -e "   ${YELLOW}   规则数量: $(iptables -t mangle -L TPROXY_CHAIN | grep -c '^[A-Z]' || echo 0)${NC}"
+            else
+                echo -e "   ${YELLOW}⚠️  TPROXY_CHAIN 链不存在（可能使用 eBPF 方案）${NC}"
+            fi
+            
+            # 检查 TC eBPF
+            echo ""
+            echo -e "${CYAN}3. TC eBPF 检查:${NC}"
+            local MAIN_IF=$(ip -4 route show default 2>/dev/null | grep -o 'dev [^ ]*' | awk '{print $2}' | head -n1)
+            [ -z "$MAIN_IF" ] && MAIN_IF=$(ip -4 link show 2>/dev/null | grep -E '^[0-9]+:' | grep -v 'lo:' | head -n1 | awk -F': ' '{print $2}' | awk '{print $1}')
+            if [ -n "$MAIN_IF" ]; then
+                if tc qdisc show dev "$MAIN_IF" 2>/dev/null | grep -q "clsact"; then
+                    echo -e "   ${GREEN}✅ clsact qdisc 已创建 (接口: $MAIN_IF)${NC}"
+                    if tc filter show dev "$MAIN_IF" ingress 2>/dev/null | grep -q "bpf"; then
+                        echo -e "   ${GREEN}✅ eBPF 程序已加载${NC}"
+                    else
+                        echo -e "   ${YELLOW}⚠️  eBPF 程序未加载（可能使用 iptables 方案）${NC}"
+                    fi
+                else
+                    echo -e "   ${YELLOW}⚠️  clsact qdisc 不存在（可能使用 iptables 方案）${NC}"
+                fi
+            else
+                echo -e "   ${RED}❌ 无法检测主网络接口${NC}"
+            fi
+            
+            # 检查策略路由
+            echo ""
+            echo -e "${CYAN}4. 策略路由检查:${NC}"
+            if ip rule show | grep -q "fwmark 0x2333"; then
+                echo -e "   ${GREEN}✅ fwmark 0x2333 规则已配置${NC}"
+            else
+                echo -e "   ${RED}❌ fwmark 0x2333 规则未找到！${NC}"
+            fi
+            if ip route show table 100 2>/dev/null | grep -q "local default"; then
+                echo -e "   ${GREEN}✅ 路由表 100 已配置${NC}"
+            else
+                echo -e "   ${RED}❌ 路由表 100 未正确配置！${NC}"
+            fi
+            
+            # 检查服务状态
+            echo ""
+            echo -e "${CYAN}5. 服务状态检查:${NC}"
+            if [ "$OS_DIST" == "alpine" ]; then
+                if rc-service tproxy status >/dev/null 2>&1; then
+                    echo -e "   ${GREEN}✅ iptables tproxy 服务: 运行中${NC}"
+                elif [ -f /etc/init.d/tproxy ]; then
+                    echo -e "   ${YELLOW}⚠️  iptables tproxy 服务: 已安装但未运行${NC}"
+                fi
+                if rc-service ebpf-tproxy status >/dev/null 2>&1; then
+                    echo -e "   ${GREEN}✅ eBPF ebpf-tproxy 服务: 运行中${NC}"
+                elif [ -f /etc/init.d/ebpf-tproxy ]; then
+                    echo -e "   ${YELLOW}⚠️  eBPF ebpf-tproxy 服务: 已安装但未运行${NC}"
+                fi
+            else
+                if systemctl is-active --quiet tproxy.service 2>/dev/null; then
+                    echo -e "   ${GREEN}✅ iptables tproxy.service: 运行中${NC}"
+                elif systemctl is-enabled --quiet tproxy.service 2>/dev/null; then
+                    echo -e "   ${YELLOW}⚠️  iptables tproxy.service: 已启用但未运行${NC}"
+                fi
+                if systemctl is-active --quiet ebpf-tproxy.service 2>/dev/null; then
+                    echo -e "   ${GREEN}✅ eBPF ebpf-tproxy.service: 运行中${NC}"
+                elif systemctl is-enabled --quiet ebpf-tproxy.service 2>/dev/null; then
+                    echo -e "   ${YELLOW}⚠️  eBPF ebpf-tproxy.service: 已启用但未运行${NC}"
+                fi
+            fi
+            
+            # 检查 IP 转发
+            echo ""
+            echo -e "${CYAN}6. 系统配置检查:${NC}"
+            if [ "$(sysctl -n net.ipv4.ip_forward 2>/dev/null)" = "1" ]; then
+                echo -e "   ${GREEN}✅ IPv4 转发已启用${NC}"
+            else
+                echo -e "   ${RED}❌ IPv4 转发未启用！${NC}"
+                echo -e "   ${YELLOW}   修复: sysctl -w net.ipv4.ip_forward=1${NC}"
+            fi
+            
+            # 检查日志
+            echo ""
+            echo -e "${CYAN}7. 日志文件:${NC}"
+            if [ -f /var/log/ebpf-tproxy.log ]; then
+                echo -e "   ${GREEN}✅ eBPF 日志: /var/log/ebpf-tproxy.log${NC}"
+                echo -e "   ${YELLOW}   最后 5 行:${NC}"
+                tail -5 /var/log/ebpf-tproxy.log 2>/dev/null | sed 's/^/      /'
+            fi
+            if [ -f /var/log/tproxy.log ]; then
+                echo -e "   ${GREEN}✅ iptables 日志: /var/log/tproxy.log${NC}"
+                echo -e "   ${YELLOW}   最后 5 行:${NC}"
+                tail -5 /var/log/tproxy.log 2>/dev/null | sed 's/^/      /'
+            fi
+            
+            echo ""
+            echo -e "${YELLOW}💡 如果发现问题，可以尝试重新安装 TProxy 方案${NC}"
             ;;
         *)
             echo -e "${RED}❌ 无效选项。${NC}"

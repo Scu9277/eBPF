@@ -519,6 +519,18 @@ log() {
 
 log "🚀 开始配置 eBPF TC TProxy..."
 
+# 加载必要的内核模块（TProxy 必需）
+log "📦 正在加载内核模块..."
+for mod in xt_TPROXY nf_tproxy_ipv4; do
+    modprobe \$mod 2>/dev/null && log "✅ 加载模块: \$mod" || log "⚠️  模块 \$mod 可能已加载或不可用"
+done
+
+# 启用 IP 转发（必需）
+sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1
+if ! grep -q '^net.ipv4.ip_forward' /etc/sysctl.conf 2>/dev/null; then
+    echo "net.ipv4.ip_forward = 1" >> /etc/sysctl.conf
+fi
+
 # 检测主网卡 IP
 MAIN_IP=\$(ip -4 addr show "\$MAIN_IF" 2>/dev/null | grep 'inet ' | awk '{print \$2}' | cut -d/ -f1 | head -n1)
 if [ -n "\$MAIN_IP" ]; then
@@ -634,12 +646,7 @@ ip rule del fwmark \$TPROXY_MARK table \$TABLE_ID 2>/dev/null || true
 ip route flush table \$TABLE_ID 2>/dev/null || true
 ip rule add fwmark \$TPROXY_MARK table \$TABLE_ID
 ip route add local default dev lo table \$TABLE_ID
-
-# 启用 IP 转发
-sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1
-if ! grep -q '^net.ipv4.ip_forward' /etc/sysctl.conf 2>/dev/null; then
-    echo "net.ipv4.ip_forward = 1" >> /etc/sysctl.conf
-fi
+log "✅ 策略路由配置完成"
 
 # 性能优化：调整内核参数
 log "⚡ 正在优化内核参数..."
@@ -661,6 +668,42 @@ EOFSYSCTL
 fi
 
 log "✅ eBPF TC TProxy 配置完成"
+
+# 验证配置
+log "🔍 正在验证配置..."
+if [ "\$USE_EBPF" = "true" ]; then
+    if tc filter show dev "\$MAIN_IF" ingress 2>/dev/null | grep -q "bpf"; then
+        log "✅ eBPF 程序已成功加载"
+    else
+        log "⚠️  eBPF 程序可能未正确加载"
+    fi
+else
+    if iptables -t mangle -L TPROXY_CHAIN >/dev/null 2>&1; then
+        log "✅ iptables TPROXY_CHAIN 规则已创建"
+        if iptables -t mangle -L PREROUTING -n | grep -q "TPROXY_CHAIN"; then
+            log "✅ iptables PREROUTING 跳转规则已配置"
+        else
+            log "❌ 警告：iptables PREROUTING 跳转规则未找到！"
+        fi
+    else
+        log "❌ 错误：iptables TPROXY_CHAIN 规则创建失败！"
+    fi
+fi
+
+# 验证策略路由
+if ip rule show | grep -q "fwmark \$TPROXY_MARK"; then
+    log "✅ 策略路由规则已配置"
+else
+    log "❌ 错误：策略路由规则未找到！"
+fi
+
+if ip route show table \$TABLE_ID 2>/dev/null | grep -q "local default"; then
+    log "✅ 路由表 \$TABLE_ID 已配置"
+else
+    log "❌ 错误：路由表 \$TABLE_ID 未正确配置！"
+fi
+
+log "📊 配置验证完成"
 EOF
 
     chmod +x "$EBPF_SCRIPT"
