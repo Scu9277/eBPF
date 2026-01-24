@@ -986,6 +986,96 @@ install_substore() {
 # ----------------------------------------------------------------
 #   组件 5: TProxy
 # ----------------------------------------------------------------
+
+# 清理旧的 TProxy 配置
+cleanup_old_tproxy() {
+    echo -e "${YELLOW}🧹 正在清理旧的 TProxy 配置...${NC}"
+    
+    local cleaned=false
+    local TPROXY_MARK=0x2333
+    local TABLE_ID=100
+    
+    # 检测主网卡
+    local MAIN_IF=$(ip -4 route show default 2>/dev/null | grep -o 'dev [^ ]*' | awk '{print $2}' | head -n1)
+    [ -z "$MAIN_IF" ] && MAIN_IF=$(ip -4 link show 2>/dev/null | grep -E '^[0-9]+:' | grep -v 'lo:' | head -n1 | awk -F': ' '{print $2}' | awk '{print $1}')
+    
+    # 1. 清理 iptables TProxy 规则
+    if iptables -t mangle -L TPROXY_CHAIN >/dev/null 2>&1; then
+        echo -e "${YELLOW}  - 清理 iptables TPROXY_CHAIN 规则...${NC}"
+        iptables -t mangle -D PREROUTING -j TPROXY_CHAIN 2>/dev/null || true
+        iptables -t mangle -F TPROXY_CHAIN 2>/dev/null || true
+        iptables -t mangle -X TPROXY_CHAIN 2>/dev/null || true
+        cleaned=true
+    fi
+    
+    # 2. 清理 TC eBPF 规则
+    if [ -n "$MAIN_IF" ] && tc qdisc show dev "$MAIN_IF" | grep -q "clsact"; then
+        echo -e "${YELLOW}  - 清理 TC clsact qdisc 和 filters...${NC}"
+        tc filter del dev "$MAIN_IF" ingress 2>/dev/null || true
+        tc filter del dev "$MAIN_IF" egress 2>/dev/null || true
+        tc qdisc del dev "$MAIN_IF" clsact 2>/dev/null || true
+        cleaned=true
+    fi
+    
+    # 3. 清理 eBPF 程序
+    if [ -f /sys/fs/bpf/tproxy_prog ]; then
+        echo -e "${YELLOW}  - 清理 eBPF 程序...${NC}"
+        rm -f /sys/fs/bpf/tproxy_prog 2>/dev/null || true
+        cleaned=true
+    fi
+    
+    # 4. 清理策略路由
+    if ip rule show | grep -q "fwmark $TPROXY_MARK"; then
+        echo -e "${YELLOW}  - 清理策略路由规则...${NC}"
+        ip rule del fwmark $TPROXY_MARK table $TABLE_ID 2>/dev/null || true
+        ip route flush table $TABLE_ID 2>/dev/null || true
+        cleaned=true
+    fi
+    
+    # 5. 停止并禁用旧服务
+    # iptables tproxy 服务
+    if [ "$OS_DIST" == "alpine" ]; then
+        if rc-service tproxy status >/dev/null 2>&1 || [ -f /etc/init.d/tproxy ]; then
+            echo -e "${YELLOW}  - 停止并禁用 iptables tproxy 服务...${NC}"
+            rc-service tproxy stop 2>/dev/null || true
+            rc-update del tproxy default 2>/dev/null || true
+            cleaned=true
+        fi
+        # eBPF tproxy 服务
+        if rc-service ebpf-tproxy status >/dev/null 2>&1 || [ -f /etc/init.d/ebpf-tproxy ]; then
+            echo -e "${YELLOW}  - 停止并禁用 eBPF ebpf-tproxy 服务...${NC}"
+            rc-service ebpf-tproxy stop 2>/dev/null || true
+            rc-update del ebpf-tproxy default 2>/dev/null || true
+            cleaned=true
+        fi
+    else
+        if systemctl is-active --quiet tproxy.service 2>/dev/null || systemctl is-enabled --quiet tproxy.service 2>/dev/null; then
+            echo -e "${YELLOW}  - 停止并禁用 iptables tproxy 服务...${NC}"
+            systemctl stop tproxy.service 2>/dev/null || true
+            systemctl disable tproxy.service 2>/dev/null || true
+            cleaned=true
+        fi
+        # eBPF tproxy 服务
+        if systemctl is-active --quiet ebpf-tproxy.service 2>/dev/null || systemctl is-enabled --quiet ebpf-tproxy.service 2>/dev/null; then
+            echo -e "${YELLOW}  - 停止并禁用 eBPF ebpf-tproxy 服务...${NC}"
+            systemctl stop ebpf-tproxy.service 2>/dev/null || true
+            systemctl disable ebpf-tproxy.service 2>/dev/null || true
+            cleaned=true
+        fi
+        # 如果清理了服务，重新加载 systemd
+        if [ "$cleaned" = true ]; then
+            systemctl daemon-reload 2>/dev/null || true
+        fi
+    fi
+    
+    if [ "$cleaned" = true ]; then
+        echo -e "${GREEN}✅ 旧配置清理完成${NC}"
+    else
+        echo -e "${GREEN}👍 未检测到旧的 TProxy 配置${NC}"
+    fi
+    echo ""
+}
+
 install_tproxy() {
     echo -e "${BLUE}--- 正在安装 [组件 5: TProxy] ---${NC}"
     echo "请选择 TProxy 模式:"
@@ -994,6 +1084,9 @@ install_tproxy() {
     echo "  3) 旧版 eBPF TC TProxy 模式 (mihomo/deploy.sh)"
     echo
     read -p "请输入选项 [1-3]: " t_choice
+    
+    # 在安装新方案前，先清理旧配置
+    cleanup_old_tproxy
 
     case $t_choice in
         1)
