@@ -770,7 +770,7 @@ install_tproxy() {
     case $t_choice in
         1)
             echo -e "🔧 准备执行 TProxy 脚本 (setup-tproxy-ipv4.sh)..."
-            TPROXY_SCRIPT_URL="https://raw.githubusercontent.com/Scu9277/TProxy/refs/heads/main/Tproxy/setup-tproxy-ipv4.sh"
+            TPROXY_SCRIPT_URL="https://raw.githubusercontent.com/Scu9277/eBPF/refs/heads/main/Alpine/setup-tproxy-ipv4.sh"
             TPROXY_SCRIPT_URL=$(process_github_url "$TPROXY_SCRIPT_URL")
             if bash <(curl -sSL "$TPROXY_SCRIPT_URL"); then
                 echo -e "${GREEN}✅ TProxy 脚本执行完毕！${NC}"
