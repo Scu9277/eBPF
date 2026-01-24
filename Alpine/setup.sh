@@ -989,32 +989,66 @@ install_substore() {
 install_tproxy() {
     echo -e "${BLUE}--- 正在安装 [组件 5: TProxy] ---${NC}"
     echo "请选择 TProxy 模式:"
-    echo "  1) 传统 Shell 脚本模式 (setup-tproxy-ipv4.sh)"
-    echo "  2) 全新 eBPF TC 模式 (高性能/eBPF TC + iptables/推荐)"
+    echo "  1) 传统 iptables TProxy 模式 (setup-tproxy-ipv4.sh)"
+    echo "  2) 高性能 eBPF TC TProxy 模式 v2.0 (自动识别系统/推荐)"
+    echo "  3) 旧版 eBPF TC TProxy 模式 (mihomo/deploy.sh)"
     echo
-    read -p "请输入选项 [1-2]: " t_choice
+    read -p "请输入选项 [1-3]: " t_choice
 
-        case $t_choice in
+    case $t_choice in
         1)
-            echo -e "🔧 准备执行 TProxy 脚本 (setup-tproxy-ipv4.sh)..."
+            echo -e "🔧 准备执行传统 iptables TProxy 脚本..."
             TPROXY_SCRIPT_URL="https://raw.githubusercontent.com/Scu9277/eBPF/refs/heads/main/Alpine/setup-tproxy-ipv4.sh"
             if safe_github_script_exec "$TPROXY_SCRIPT_URL"; then
-                echo -e "${GREEN}✅ TProxy 脚本执行完毕！${NC}"
+                echo -e "${GREEN}✅ iptables TProxy 脚本执行完毕！${NC}"
             else
-                echo -e "${RED}❌ TProxy 脚本执行失败。${NC}"
+                echo -e "${RED}❌ iptables TProxy 脚本执行失败。${NC}"
             fi
             ;;
         2)
-            echo -e "🐝 准备安装 eBPF TC TProxy..."
-            EBPF_DEPLOY_URL="https://raw.githubusercontent.com/Scu9277/eBPF/refs/heads/main/mihomo/deploy.sh"
+            echo -e "🚀 准备安装高性能 eBPF TC TProxy v2.0..."
+            echo -e "${YELLOW}📋 特性：${NC}"
+            echo -e "  - 自动识别系统类型 (Debian/Ubuntu/CentOS/Alpine)"
+            echo -e "  - 自动安装所有依赖"
+            echo -e "  - 自动检测并编译 eBPF 程序（如果支持）"
+            echo -e "  - 性能比 iptables 提升 3-5 倍"
+            echo -e "  - 如果 eBPF 不可用，自动回退到优化的 iptables 方案"
+            echo ""
+            EBPF_SCRIPT_URL="https://raw.githubusercontent.com/Scu9277/eBPF/refs/heads/main/Alpine/setup-ebpf-tc-tproxy.sh"
             echo -e "📥 正在下载并执行 eBPF TC TProxy 部署脚本..."
+            if safe_github_script_exec "$EBPF_SCRIPT_URL"; then
+                echo -e "${GREEN}✅ eBPF TC TProxy 部署完成！${NC}"
+                echo ""
+                echo -e "${YELLOW}💡 服务管理提示：${NC}"
+                if [ "$OS_DIST" == "alpine" ]; then
+                    echo -e "  启动: ${CYAN}rc-service ebpf-tproxy start${NC}"
+                    echo -e "  停止: ${CYAN}rc-service ebpf-tproxy stop${NC}"
+                    echo -e "  状态: ${CYAN}rc-service ebpf-tproxy status${NC}"
+                    echo -e "  日志: ${CYAN}tail -f /var/log/ebpf-tproxy.log${NC}"
+                else
+                    echo -e "  启动: ${CYAN}systemctl start ebpf-tproxy${NC}"
+                    echo -e "  停止: ${CYAN}systemctl stop ebpf-tproxy${NC}"
+                    echo -e "  状态: ${CYAN}systemctl status ebpf-tproxy${NC}"
+                    echo -e "  日志: ${CYAN}journalctl -u ebpf-tproxy -f${NC}"
+                fi
+            else
+                echo -e "${RED}❌ eBPF TC TProxy 部署失败。${NC}"
+                echo -e "${YELLOW}💡 提示：请检查网络连接或查看错误信息${NC}"
+            fi
+            ;;
+        3)
+            echo -e "🐝 准备安装旧版 eBPF TC TProxy..."
+            echo -e "${YELLOW}📋 这是旧版本的 eBPF 部署脚本${NC}"
+            echo ""
+            EBPF_DEPLOY_URL="https://raw.githubusercontent.com/Scu9277/eBPF/refs/heads/main/mihomo/deploy.sh"
+            echo -e "📥 正在下载并执行旧版 eBPF TC TProxy 部署脚本..."
             if safe_github_script_exec "$EBPF_DEPLOY_URL"; then
-                echo -e "${GREEN}✅ eBPF TC TProxy 部署脚本执行完毕！${NC}"
+                echo -e "${GREEN}✅ 旧版 eBPF TC TProxy 部署脚本执行完毕！${NC}"
                 echo -e "${YELLOW}💡 提示：你可以运行以下命令检查 TProxy 状态：${NC}"
                 CHECK_URL="https://raw.githubusercontent.com/Scu9277/eBPF/refs/heads/main/mihomo/check_tproxy.sh"
                 echo -e "   ${CYAN}bash <(curl -sSL $CHECK_URL)${NC}"
             else
-                echo -e "${RED}❌ eBPF TC TProxy 部署失败。${NC}"
+                echo -e "${RED}❌ 旧版 eBPF TC TProxy 部署失败。${NC}"
             fi
             ;;
         *)
@@ -1268,7 +1302,7 @@ main_menu() {
     echo "  4) 安装 Docker (linuxmirrors.cn)"
     # V13 变更: 移除了 V12 中多余的 "S"
     echo "  5) 安装 Sub-Store (依赖 Docker)"
-    echo "  6) 安装 TProxy (setup-tproxy-ipv4.sh)"
+    echo "  6) 安装 TProxy (iptables/eBPF TC 可选)"
     echo "  7) 安装 DNS 劫持 (/etc/hosts)"
     echo "  8) 配置网卡IP (renetwork.sh)"
     echo "  9) 服务管理 (Start/Stop/Logs)"
