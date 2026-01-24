@@ -642,10 +642,34 @@ fi
 
 # 配置策略路由
 log "🛣️  正在配置策略路由..."
+# 清理旧规则
 ip rule del fwmark \$TPROXY_MARK table \$TABLE_ID 2>/dev/null || true
 ip route flush table \$TABLE_ID 2>/dev/null || true
-ip rule add fwmark \$TPROXY_MARK table \$TABLE_ID
-ip route add local default dev lo table \$TABLE_ID
+
+# 添加策略路由规则（带错误检查）
+if ip rule add fwmark \$TPROXY_MARK table \$TABLE_ID 2>&1; then
+    log "✅ 策略路由规则添加成功"
+else
+    log "❌ 错误：策略路由规则添加失败！"
+    exit 1
+fi
+
+# 添加路由表条目（带错误检查）
+if ip route add local default dev lo table \$TABLE_ID 2>&1; then
+    log "✅ 路由表 \$TABLE_ID 配置成功"
+else
+    log "❌ 错误：路由表 \$TABLE_ID 配置失败！"
+    # 尝试修复：先删除可能存在的冲突路由
+    ip route del local default dev lo table \$TABLE_ID 2>/dev/null || true
+    sleep 1
+    if ip route add local default dev lo table \$TABLE_ID 2>&1; then
+        log "✅ 路由表 \$TABLE_ID 配置成功（修复后）"
+    else
+        log "❌ 错误：路由表 \$TABLE_ID 配置仍然失败！"
+        exit 1
+    fi
+fi
+
 log "✅ 策略路由配置完成"
 
 # 性能优化：调整内核参数
@@ -733,11 +757,17 @@ depend() {
 
 start() {
     ebegin "Starting eBPF TC TProxy service"
-    sleep 2
+    # 等待网络就绪
+    sleep 3
+    # 确保内核模块已加载
+    modprobe xt_TPROXY 2>/dev/null || true
+    modprobe nf_tproxy_ipv4 2>/dev/null || true
+    # 执行配置脚本
     if \$command; then
         eend 0
     else
         eend 1
+        return 1
     fi
 }
 
@@ -761,6 +791,9 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
+ExecStartPre=/bin/sleep 3
+ExecStartPre=/sbin/modprobe xt_TPROXY || true
+ExecStartPre=/sbin/modprobe nf_tproxy_ipv4 || true
 ExecStart=$EBPF_SCRIPT
 StandardOutput=journal
 StandardError=journal

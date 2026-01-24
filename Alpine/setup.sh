@@ -1200,33 +1200,39 @@ install_tproxy() {
     echo
     read -p "请输入选项 [1-4]: " t_choice
     
-    # 检查是否选择了当前使用的方案
-    local selected_scheme=""
-    case $t_choice in
-        1) selected_scheme="iptables" ;;
-        2) selected_scheme="ebpf-v2" ;;
-        3) selected_scheme="ebpf-old" ;;
-    esac
-    
-    if [ "$selected_scheme" = "$current_scheme" ] && [ "$current_scheme" != "none" ]; then
-        echo ""
-        echo -e "${YELLOW}⚠️  您选择的是当前正在使用的方案${NC}"
-        read -p "是否要重新安装此方案？(y/N): " reinstall_confirm
-        if [[ ! "$reinstall_confirm" =~ ^[Yy]$ ]]; then
-            echo -e "${GREEN}👍 操作已取消${NC}"
-            echo "----------------------------------------------------------------"
-            return
+    # 如果是诊断选项，直接执行诊断，不进行清理
+    if [ "$t_choice" = "4" ]; then
+        # 诊断逻辑在 case 语句中，这里直接跳转
+        :
+    else
+        # 检查是否选择了当前使用的方案
+        local selected_scheme=""
+        case $t_choice in
+            1) selected_scheme="iptables" ;;
+            2) selected_scheme="ebpf-v2" ;;
+            3) selected_scheme="ebpf-old" ;;
+        esac
+        
+        if [ "$selected_scheme" = "$current_scheme" ] && [ "$current_scheme" != "none" ]; then
+            echo ""
+            echo -e "${YELLOW}⚠️  您选择的是当前正在使用的方案${NC}"
+            read -p "是否要重新安装此方案？(y/N): " reinstall_confirm
+            if [[ ! "$reinstall_confirm" =~ ^[Yy]$ ]]; then
+                echo -e "${GREEN}👍 操作已取消${NC}"
+                echo "----------------------------------------------------------------"
+                return
+            fi
+            echo ""
         fi
-        echo ""
-    fi
-    
-    # 在安装新方案前，先清理旧配置（如果选择了不同的方案）
-    if [ "$selected_scheme" != "$current_scheme" ] && [ "$current_scheme" != "none" ]; then
-        cleanup_old_tproxy
-    elif [ "$selected_scheme" = "$current_scheme" ] && [ "$current_scheme" != "none" ]; then
-        # 重新安装当前方案，也需要清理
-        echo -e "${YELLOW}🔄 重新安装当前方案，正在清理旧配置...${NC}"
-        cleanup_old_tproxy
+        
+        # 在安装新方案前，先清理旧配置（如果选择了不同的方案）
+        if [ "$selected_scheme" != "$current_scheme" ] && [ "$current_scheme" != "none" ]; then
+            cleanup_old_tproxy
+        elif [ "$selected_scheme" = "$current_scheme" ] && [ "$current_scheme" != "none" ]; then
+            # 重新安装当前方案，也需要清理
+            echo -e "${YELLOW}🔄 重新安装当前方案，正在清理旧配置...${NC}"
+            cleanup_old_tproxy
+        fi
     fi
 
     case $t_choice in
@@ -1400,7 +1406,112 @@ install_tproxy() {
             fi
             
             echo ""
-            echo -e "${YELLOW}💡 如果发现问题，可以尝试重新安装 TProxy 方案${NC}"
+            
+            # 检查是否有问题需要修复
+            local has_issues=false
+            if ! ip rule show | grep -q "fwmark 0x2333" || ! ip route show table 100 2>/dev/null | grep -q "local default"; then
+                has_issues=true
+            fi
+            
+            if [ "$has_issues" = true ]; then
+                echo -e "${YELLOW}⚠️  检测到配置问题！${NC}"
+                read -p "是否尝试自动修复？(y/N): " fix_confirm
+                if [[ "$fix_confirm" =~ ^[Yy]$ ]]; then
+                    echo ""
+                    echo -e "${YELLOW}🔧 正在尝试修复...${NC}"
+                    
+                    # 检测主网卡
+                    local MAIN_IF=$(ip -4 route show default 2>/dev/null | grep -o 'dev [^ ]*' | awk '{print $2}' | head -n1)
+                    [ -z "$MAIN_IF" ] && MAIN_IF=$(ip -4 link show 2>/dev/null | grep -E '^[0-9]+:' | grep -v 'lo:' | head -n1 | awk -F': ' '{print $2}' | awk '{print $1}')
+                    
+                    # 加载内核模块
+                    modprobe xt_TPROXY 2>/dev/null || true
+                    modprobe nf_tproxy_ipv4 2>/dev/null || true
+                    
+                    # 修复策略路由
+                    echo -e "${YELLOW}  - 修复策略路由...${NC}"
+                    ip rule del fwmark 0x2333 table 100 2>/dev/null || true
+                    ip route flush table 100 2>/dev/null || true
+                    if ip rule add fwmark 0x2333 table 100 2>/dev/null; then
+                        echo -e "${GREEN}    ✅ 策略路由规则已添加${NC}"
+                    else
+                        echo -e "${RED}    ❌ 策略路由规则添加失败${NC}"
+                    fi
+                    
+                    if ip route add local default dev lo table 100 2>/dev/null; then
+                        echo -e "${GREEN}    ✅ 路由表 100 已配置${NC}"
+                    else
+                        echo -e "${RED}    ❌ 路由表 100 配置失败${NC}"
+                    fi
+                    
+                    # 如果使用 eBPF 方案，重新启动服务
+                    if [ "$current_scheme" = "ebpf-v2" ]; then
+                        echo -e "${YELLOW}  - 重新启动 eBPF TProxy 服务...${NC}"
+                        if [ "$OS_DIST" == "alpine" ]; then
+                            rc-service ebpf-tproxy restart 2>/dev/null || rc-service ebpf-tproxy start 2>/dev/null || true
+                        else
+                            systemctl restart ebpf-tproxy.service 2>/dev/null || systemctl start ebpf-tproxy.service 2>/dev/null || true
+                        fi
+                        sleep 2
+                    elif [ "$current_scheme" = "iptables" ]; then
+                        echo -e "${YELLOW}  - 重新启动 iptables TProxy 服务...${NC}"
+                        if [ "$OS_DIST" == "alpine" ]; then
+                            rc-service tproxy restart 2>/dev/null || rc-service tproxy start 2>/dev/null || true
+                        else
+                            systemctl restart tproxy.service 2>/dev/null || systemctl start tproxy.service 2>/dev/null || true
+                        fi
+                        sleep 2
+                    fi
+                    
+                    echo ""
+                    echo -e "${GREEN}✅ 修复完成！请重新运行诊断检查结果${NC}"
+                else
+                    echo -e "${YELLOW}💡 如果发现问题，可以尝试重新安装 TProxy 方案${NC}"
+                fi
+            else
+                echo -e "${GREEN}✅ 配置看起来正常${NC}"
+            fi
+            
+            # 如果服务未运行，提示启动
+            if [ "$current_scheme" != "none" ]; then
+                local service_running=false
+                if [ "$current_scheme" = "ebpf-v2" ]; then
+                    if [ "$OS_DIST" == "alpine" ]; then
+                        rc-service ebpf-tproxy status >/dev/null 2>&1 && service_running=true
+                    else
+                        systemctl is-active --quiet ebpf-tproxy.service 2>/dev/null && service_running=true
+                    fi
+                elif [ "$current_scheme" = "iptables" ]; then
+                    if [ "$OS_DIST" == "alpine" ]; then
+                        rc-service tproxy status >/dev/null 2>&1 && service_running=true
+                    else
+                        systemctl is-active --quiet tproxy.service 2>/dev/null && service_running=true
+                    fi
+                fi
+                
+                if [ "$service_running" = false ]; then
+                    echo ""
+                    echo -e "${YELLOW}⚠️  检测到服务未运行${NC}"
+                    read -p "是否启动服务以应用配置？(Y/n): " start_service
+                    if [[ ! "$start_service" =~ ^[Nn]$ ]]; then
+                        if [ "$current_scheme" = "ebpf-v2" ]; then
+                            if [ "$OS_DIST" == "alpine" ]; then
+                                rc-service ebpf-tproxy start
+                            else
+                                systemctl start ebpf-tproxy.service
+                            fi
+                        elif [ "$current_scheme" = "iptables" ]; then
+                            if [ "$OS_DIST" == "alpine" ]; then
+                                rc-service tproxy start
+                            else
+                                systemctl start tproxy.service
+                            fi
+                        fi
+                        sleep 2
+                        echo -e "${GREEN}✅ 服务已启动${NC}"
+                    fi
+                fi
+            fi
             ;;
         *)
             echo -e "${RED}❌ 无效选项。${NC}"
