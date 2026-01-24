@@ -244,6 +244,224 @@ process_github_url() {
     echo "$url"
 }
 
+# 安全的 GitHub API 请求函数（带自动回退）
+# 参数: API URL
+# 返回: JSON 响应内容
+safe_github_api_request() {
+    local api_url="$1"
+    local max_retries=3
+    local retry_count=0
+    local response=""
+    local temp_file="/tmp/github_api_response_$$.json"
+    
+    # 首先尝试使用代理（如果已选择）
+    if [ -n "$GITHUB_PROXY" ]; then
+        local proxy_url=$(process_github_url "$api_url")
+        echo -e "${YELLOW}尝试使用代理获取版本信息: ${proxy_url}${NC}" >&2
+        
+        for ((retry_count=1; retry_count<=max_retries; retry_count++)); do
+            response=$(curl -sL --connect-timeout 10 --max-time 30 "$proxy_url" 2>/dev/null)
+            
+            # 检查是否是有效的 JSON（简单检查：以 { 或 [ 开头）
+            if [[ "$response" =~ ^[[:space:]]*[\{\[] ]] && echo "$response" | jq . >/dev/null 2>&1; then
+                echo "$response"
+                rm -f "$temp_file" 2>/dev/null
+                return 0
+            fi
+            
+            if [ $retry_count -lt $max_retries ]; then
+                echo -e "${YELLOW}代理请求失败，重试 $retry_count/$max_retries...${NC}" >&2
+                sleep 1
+            fi
+        done
+        
+        echo -e "${YELLOW}⚠️  代理请求失败，尝试直接连接...${NC}" >&2
+    fi
+    
+    # 如果代理失败或未使用代理，尝试直接连接
+    echo -e "${YELLOW}尝试直接连接 GitHub API...${NC}" >&2
+    for ((retry_count=1; retry_count<=max_retries; retry_count++)); do
+        response=$(curl -sL --connect-timeout 10 --max-time 30 "$api_url" 2>/dev/null)
+        
+        # 检查是否是有效的 JSON
+        if [[ "$response" =~ ^[[:space:]]*[\{\[] ]] && echo "$response" | jq . >/dev/null 2>&1; then
+            echo "$response"
+            rm -f "$temp_file" 2>/dev/null
+            return 0
+        fi
+        
+        if [ $retry_count -lt $max_retries ]; then
+            echo -e "${YELLOW}直接连接失败，重试 $retry_count/$max_retries...${NC}" >&2
+            sleep 2
+        fi
+    done
+    
+    # 所有尝试都失败
+    echo -e "${RED}❌ 无法获取 GitHub API 响应（所有尝试均失败）${NC}" >&2
+    echo -e "${YELLOW}最后返回的内容（可能不是有效的 JSON）:${NC}" >&2
+    echo "$response" | head -5 >&2
+    rm -f "$temp_file" 2>/dev/null
+    return 1
+}
+
+# 安全的 GitHub 脚本执行函数（带自动回退）
+# 参数: 脚本 URL
+safe_github_script_exec() {
+    local script_url="$1"
+    local max_retries=3
+    local retry_count=0
+    local script_content=""
+    local temp_script="/tmp/github_script_$$.sh"
+    
+    # 首先尝试使用代理（如果已选择）
+    if [ -n "$GITHUB_PROXY" ]; then
+        local proxy_url=$(process_github_url "$script_url")
+        
+        for ((retry_count=1; retry_count<=max_retries; retry_count++)); do
+            if command -v curl >/dev/null 2>&1; then
+                script_content=$(curl -sSL --connect-timeout 10 --max-time 30 "$proxy_url" 2>/dev/null)
+            elif command -v wget >/dev/null 2>&1; then
+                script_content=$(wget -qO- --timeout=30 "$proxy_url" 2>/dev/null)
+            fi
+            
+            # 检查是否是有效的脚本（至少包含 #!/bin/bash 或类似内容）
+            if [ -n "$script_content" ] && [[ "$script_content" =~ (#!/bin/bash|#!/bin/sh|#!/usr/bin/env) ]]; then
+                echo "$script_content" > "$temp_script"
+                chmod +x "$temp_script"
+                bash "$temp_script"
+                local result=$?
+                rm -f "$temp_script"
+                return $result
+            fi
+            
+            if [ $retry_count -lt $max_retries ]; then
+                sleep 1
+            fi
+        done
+    fi
+    
+    # 如果代理失败或未使用代理，尝试直接连接
+    for ((retry_count=1; retry_count<=max_retries; retry_count++)); do
+        if command -v curl >/dev/null 2>&1; then
+            script_content=$(curl -sSL --connect-timeout 10 --max-time 30 "$script_url" 2>/dev/null)
+        elif command -v wget >/dev/null 2>&1; then
+            script_content=$(wget -qO- --timeout=30 "$script_url" 2>/dev/null)
+        fi
+        
+        # 检查是否是有效的脚本
+        if [ -n "$script_content" ] && [[ "$script_content" =~ (#!/bin/bash|#!/bin/sh|#!/usr/bin/env) ]]; then
+            echo "$script_content" > "$temp_script"
+            chmod +x "$temp_script"
+            bash "$temp_script"
+            local result=$?
+            rm -f "$temp_script"
+            return $result
+        fi
+        
+        if [ $retry_count -lt $max_retries ]; then
+            sleep 2
+        fi
+    done
+    
+    # 所有尝试都失败
+    rm -f "$temp_script"
+    echo -e "${RED}❌ 无法下载或执行脚本（所有尝试均失败）${NC}" >&2
+    return 1
+}
+
+# 安全的 GitHub 文件下载函数（带自动回退，支持 wget 和 curl）
+# 参数: 下载 URL, 输出文件路径
+safe_github_download() {
+    local download_url="$1"
+    local output_path="$2"
+    local max_retries=3
+    local retry_count=0
+    local download_cmd=""
+    # 根据文件扩展名确定最小文件大小
+    local min_size=100  # 默认最小大小（字节）
+    if [[ "$output_path" =~ \.(gz|tar|tar\.gz|deb|rpm|zip)$ ]]; then
+        min_size=10240  # 压缩包至少 10KB
+    elif [[ "$output_path" =~ \.(sh|json|yaml|yml)$ ]]; then
+        min_size=100  # 脚本和配置文件至少 100 字节
+    else
+        min_size=1024  # 二进制文件至少 1KB
+    fi
+    
+    # 检测可用的下载工具
+    if command -v wget >/dev/null 2>&1; then
+        download_cmd="wget"
+    elif command -v curl >/dev/null 2>&1; then
+        download_cmd="curl"
+    else
+        echo -e "${RED}❌ 错误：未找到 wget 或 curl 命令！${NC}" >&2
+        return 1
+    fi
+    
+    # 首先尝试使用代理（如果已选择）
+    if [ -n "$GITHUB_PROXY" ]; then
+        local proxy_url=$(process_github_url "$download_url")
+        echo -e "${YELLOW}尝试使用代理下载...${NC}" >&2
+        
+        for ((retry_count=1; retry_count<=max_retries; retry_count++)); do
+            if [ "$download_cmd" == "wget" ]; then
+                if wget -O "$output_path" --timeout=30 --tries=1 "$proxy_url" 2>/dev/null; then
+                    # 检查文件大小
+                    if [ -f "$output_path" ] && [ $(stat -c%s "$output_path" 2>/dev/null || echo 0) -gt $min_size ]; then
+                        echo -e "${GREEN}✅ 代理下载成功${NC}" >&2
+                        return 0
+                    fi
+                fi
+            else
+                if curl -L -o "$output_path" --connect-timeout 30 --max-time 60 "$proxy_url" 2>/dev/null; then
+                    # 检查文件大小
+                    if [ -f "$output_path" ] && [ $(stat -c%s "$output_path" 2>/dev/null || echo 0) -gt $min_size ]; then
+                        echo -e "${GREEN}✅ 代理下载成功${NC}" >&2
+                        return 0
+                    fi
+                fi
+            fi
+            
+            if [ $retry_count -lt $max_retries ]; then
+                echo -e "${YELLOW}代理下载失败，重试 $retry_count/$max_retries...${NC}" >&2
+                sleep 1
+            fi
+        done
+        
+        echo -e "${YELLOW}⚠️  代理下载失败，尝试直接连接...${NC}" >&2
+    fi
+    
+    # 如果代理失败或未使用代理，尝试直接连接
+    echo -e "${YELLOW}尝试直接下载...${NC}" >&2
+    for ((retry_count=1; retry_count<=max_retries; retry_count++)); do
+        if [ "$download_cmd" == "wget" ]; then
+            if wget -O "$output_path" --timeout=30 --tries=1 "$download_url" 2>/dev/null; then
+                # 检查文件大小
+                if [ -f "$output_path" ] && [ $(stat -c%s "$output_path" 2>/dev/null || echo 0) -gt $min_size ]; then
+                    echo -e "${GREEN}✅ 直接下载成功${NC}" >&2
+                    return 0
+                fi
+            fi
+        else
+            if curl -L -o "$output_path" --connect-timeout 30 --max-time 60 "$download_url" 2>/dev/null; then
+                # 检查文件大小
+                if [ -f "$output_path" ] && [ $(stat -c%s "$output_path" 2>/dev/null || echo 0) -gt $min_size ]; then
+                    echo -e "${GREEN}✅ 直接下载成功${NC}" >&2
+                    return 0
+                fi
+            fi
+        fi
+        
+        if [ $retry_count -lt $max_retries ]; then
+            echo -e "${YELLOW}直接下载失败，重试 $retry_count/$max_retries...${NC}" >&2
+            sleep 2
+        fi
+    done
+    
+    # 所有尝试都失败
+    echo -e "${RED}❌ 下载失败（所有尝试均失败）${NC}" >&2
+    return 1
+}
+
 #=================================================================================
 #   SECTION 1: 核心安装程序 (Core Installers)
 #=================================================================================
@@ -272,10 +490,20 @@ install_mihomo_core_and_config() {
         mihomo -v
     else
         echo -e "📡 正在获取 Mihomo 最新版本号..."
-        API_URL=$(process_github_url "https://api.github.com/repos/MetaCubeX/mihomo/releases/latest")
-        LATEST_TAG=$(curl -sL "$API_URL" | jq -r .tag_name)
+        API_URL="https://api.github.com/repos/MetaCubeX/mihomo/releases/latest"
+        API_RESPONSE=$(safe_github_api_request "$API_URL")
+        if [ $? -ne 0 ] || [ -z "$API_RESPONSE" ]; then
+            echo -e "${RED}❌ 获取 Mihomo 最新版本号失败！${NC}"
+            echo -e "${YELLOW}提示：请检查网络连接或尝试更换 GitHub 代理${NC}"
+            exit 1
+        fi
+        
+        LATEST_TAG=$(echo "$API_RESPONSE" | jq -r .tag_name 2>/dev/null)
         if [ -z "$LATEST_TAG" ] || [ "$LATEST_TAG" == "null" ]; then
-            echo -e "${RED}❌ 获取 Mihomo 最新版本号失败！${NC}"; exit 1
+            echo -e "${RED}❌ 解析版本号失败！API 响应可能无效${NC}"
+            echo -e "${YELLOW}API 响应内容:${NC}"
+            echo "$API_RESPONSE" | head -10
+            exit 1
         fi
         echo -e "${GREEN}🎉 找到最新版本: $LATEST_TAG${NC}"
         
@@ -283,18 +511,22 @@ install_mihomo_core_and_config() {
             # Alpine 使用二进制
             GZ_FILENAME="mihomo-linux-${MIHOMO_ARCH}-${LATEST_TAG}.gz"
             DOWNLOAD_URL="https://github.com/MetaCubeX/mihomo/releases/download/${LATEST_TAG}/${GZ_FILENAME}"
-            DOWNLOAD_URL=$(process_github_url "$DOWNLOAD_URL")
-            echo -e "🚀 正在下载二进制: $DOWNLOAD_URL"
-            wget -O "/usr/local/bin/mihomo.gz" "$DOWNLOAD_URL"
+            echo -e "🚀 正在下载二进制: $GZ_FILENAME"
+            if ! safe_github_download "$DOWNLOAD_URL" "/usr/local/bin/mihomo.gz"; then
+                echo -e "${RED}❌ Mihomo 二进制下载失败！${NC}"
+                exit 1
+            fi
             gunzip -f "/usr/local/bin/mihomo.gz"
             chmod +x /usr/local/bin/mihomo
         else
             DEB_FILENAME="mihomo-linux-${MIHOMO_ARCH}-${LATEST_TAG}.deb"
             DOWNLOAD_URL="https://github.com/MetaCubeX/mihomo/releases/download/${LATEST_TAG}/${DEB_FILENAME}"
-            DOWNLOAD_URL=$(process_github_url "$DOWNLOAD_URL")
             DEB_PATH="/root/${DEB_FILENAME}"
-            echo -e "🚀 正在下载: $DOWNLOAD_URL"
-            wget -O "$DEB_PATH" "$DOWNLOAD_URL"
+            echo -e "🚀 正在下载: $DEB_FILENAME"
+            if ! safe_github_download "$DOWNLOAD_URL" "$DEB_PATH"; then
+                echo -e "${RED}❌ Mihomo DEB 包下载失败！${NC}"
+                exit 1
+            fi
             dpkg -i "$DEB_PATH"
             rm -f "$DEB_PATH"
         fi
@@ -318,11 +550,10 @@ install_mihomo_core_and_config() {
     CONFIG_ZIP_PATH="/root/mihomo_config.zip"
     TEMP_DIR="/root/mihomo_temp_unzip"
     CONFIG_ZIP_URL="https://github.com/Scu9277/eBPF/releases/download/mihomo/mihomo.zip"
-    CONFIG_ZIP_URL=$(process_github_url "$CONFIG_ZIP_URL")
-    echo -e "📥 正在从 GitHub 下载配置文件: $CONFIG_ZIP_URL"
-    wget -O "$CONFIG_ZIP_PATH" "$CONFIG_ZIP_URL"
-    if [ ! -f "$CONFIG_ZIP_PATH" ] || [ $(stat -c%s "$CONFIG_ZIP_PATH" 2>/dev/null || echo 0) -lt 100 ]; then
-        echo -e "${RED}❌ 错误：配置文件下载失败或文件异常！${NC}"; exit 1
+    echo -e "📥 正在从 GitHub 下载配置文件..."
+    if ! safe_github_download "$CONFIG_ZIP_URL" "$CONFIG_ZIP_PATH"; then
+        echo -e "${RED}❌ 错误：配置文件下载失败！${NC}"
+        exit 1
     fi
     rm -rf "$TEMP_DIR"
     mkdir -p "$TEMP_DIR"
@@ -430,24 +661,21 @@ install_singbox_core_and_config() {
     CONFIG_DIR="/etc/sing-box"
     SINGBOX_CORE_PATH="$INSTALL_DIR/sing-box"
     
-    # 从配置获取 URL（使用代理处理）
-    SINGBOX_DOWNLOAD_URL=""
+    # 从配置获取 URL
+    BASE_URL=""
     case "$SINGBOX_ARCH" in
         amd64) 
             BASE_URL="https://github.com/Scu9277/eBPF/releases/download/sing-box/sing-box-1.13.0-beta.1-reF1nd-linux-amd64"
-            SINGBOX_DOWNLOAD_URL=$(process_github_url "$BASE_URL")
             ;;
         amd64v3) 
             BASE_URL="https://github.com/Scu9277/eBPF/releases/download/sing-box/sing-box-1.13.0-beta.1-reF1nd-linux-amd64v3"
-            SINGBOX_DOWNLOAD_URL=$(process_github_url "$BASE_URL")
             ;;
         arm64) 
             BASE_URL="https://github.com/Scu9277/eBPF/releases/download/sing-box/sing-box-1.13.0-beta.1-reF1nd-linux-arm64"
-            SINGBOX_DOWNLOAD_URL=$(process_github_url "$BASE_URL")
             ;;
     esac
     
-    if [ -z "$SINGBOX_DOWNLOAD_URL" ]; then
+    if [ -z "$BASE_URL" ]; then
         echo -e "${RED}错误：无法根据架构 $SINGBOX_ARCH 匹配到下载 URL。请检查顶部配置。${NC}"
         exit 1
     fi
@@ -462,7 +690,10 @@ install_singbox_core_and_config() {
     echo -e "${YELLOW}正在下载 Sing-box 核心 ($SINGBOX_ARCH)...${NC}"
     mkdir -p $INSTALL_DIR
     rm -f "$SINGBOX_CORE_PATH" # Prevent Text file busy
-    curl -L -o "$SINGBOX_CORE_PATH" "$SINGBOX_DOWNLOAD_URL"
+    if ! safe_github_download "$BASE_URL" "$SINGBOX_CORE_PATH"; then
+        echo -e "${RED}❌ Sing-box 核心下载失败！${NC}"
+        exit 1
+    fi
     chmod +x $SINGBOX_CORE_PATH
     echo -e "${GREEN}Sing-box 核心安装成功!${NC}"
     $SINGBOX_CORE_PATH version
@@ -470,16 +701,10 @@ install_singbox_core_and_config() {
     # 5. 下载配置
     mkdir -p $CONFIG_DIR
     CONFIG_JSON_URL="https://raw.githubusercontent.com/Scu9277/TProxy/refs/heads/main/sing-box/config.json"
-    CONFIG_JSON_URL=$(process_github_url "$CONFIG_JSON_URL")
     echo -e "${YELLOW}正在下载 Sing-box 配置文件...${NC}"
-    curl -L -o "$CONFIG_DIR/config.json" "$CONFIG_JSON_URL"
-    
-    # Check if download was successful (JSON check)
-    if [ $(stat -c%s "$CONFIG_DIR/config.json") -lt 100 ]; then
-         echo -e "${RED}❌ 配置文件下载异常 (文件过小)，可能是 URL 错误或 404！${NC}"
-         echo -e "URL: $CONFIG_JSON_URL"
-         cat "$CONFIG_DIR/config.json"
-         exit 1
+    if ! safe_github_download "$CONFIG_JSON_URL" "$CONFIG_DIR/config.json"; then
+        echo -e "${RED}❌ Sing-box 配置文件下载失败！${NC}"
+        exit 1
     fi
     echo -e "${GREEN}config.json 下载成功！${NC}"
     
@@ -728,8 +953,10 @@ install_substore() {
         echo -e "${YELLOW}🔎 未找到 '$IMAGE_NAME' 镜像，正在下载...${NC}"
         echo -e "📦 正在下载 Sub-Store Docker 镜像包..."
         SUBSTORE_URL="https://github.com/Scu9277/TProxy/releases/download/1.0/sub-store.tar.gz"
-        SUBSTORE_URL=$(process_github_url "$SUBSTORE_URL")
-        wget "$SUBSTORE_URL" -O "/root/sub-store.tar.gz"
+        if ! safe_github_download "$SUBSTORE_URL" "/root/sub-store.tar.gz"; then
+            echo -e "${RED}❌ Sub-Store 镜像包下载失败！${NC}"
+            exit 1
+        fi
         echo -e "🗜️ 正在解压并加载镜像..."
         tar -xzf "/root/sub-store.tar.gz" -C "/root/"
         docker load -i "/root/sub-store.tar"
@@ -767,12 +994,11 @@ install_tproxy() {
     echo
     read -p "请输入选项 [1-2]: " t_choice
 
-    case $t_choice in
+        case $t_choice in
         1)
             echo -e "🔧 准备执行 TProxy 脚本 (setup-tproxy-ipv4.sh)..."
             TPROXY_SCRIPT_URL="https://raw.githubusercontent.com/Scu9277/eBPF/refs/heads/main/Alpine/setup-tproxy-ipv4.sh"
-            TPROXY_SCRIPT_URL=$(process_github_url "$TPROXY_SCRIPT_URL")
-            if bash <(curl -sSL "$TPROXY_SCRIPT_URL"); then
+            if safe_github_script_exec "$TPROXY_SCRIPT_URL"; then
                 echo -e "${GREEN}✅ TProxy 脚本执行完毕！${NC}"
             else
                 echo -e "${RED}❌ TProxy 脚本执行失败。${NC}"
@@ -781,13 +1007,11 @@ install_tproxy() {
         2)
             echo -e "🐝 准备安装 eBPF TC TProxy..."
             EBPF_DEPLOY_URL="https://raw.githubusercontent.com/Scu9277/eBPF/refs/heads/main/mihomo/deploy.sh"
-            EBPF_DEPLOY_URL=$(process_github_url "$EBPF_DEPLOY_URL")
             echo -e "📥 正在下载并执行 eBPF TC TProxy 部署脚本..."
-            if bash <(curl -sSL "$EBPF_DEPLOY_URL"); then
+            if safe_github_script_exec "$EBPF_DEPLOY_URL"; then
                 echo -e "${GREEN}✅ eBPF TC TProxy 部署脚本执行完毕！${NC}"
                 echo -e "${YELLOW}💡 提示：你可以运行以下命令检查 TProxy 状态：${NC}"
                 CHECK_URL="https://raw.githubusercontent.com/Scu9277/eBPF/refs/heads/main/mihomo/check_tproxy.sh"
-                CHECK_URL=$(process_github_url "$CHECK_URL")
                 echo -e "   ${CYAN}bash <(curl -sSL $CHECK_URL)${NC}"
             else
                 echo -e "${RED}❌ eBPF TC TProxy 部署失败。${NC}"
@@ -808,8 +1032,7 @@ install_renetwork() {
     echo -e "🚀 正在下载并执行 renetwork.sh 脚本..."
     
     RENETWORK_URL="https://raw.githubusercontent.com/Scu9277/eBPF/refs/heads/main/Alpine/renetwork.sh"
-    RENETWORK_URL=$(process_github_url "$RENETWORK_URL")
-    if bash <(curl -sSL "$RENETWORK_URL"); then
+    if safe_github_script_exec "$RENETWORK_URL"; then
         echo -e "${GREEN}✅ 网卡配置脚本执行完毕。${NC}"
     else
         echo -e "${RED}❌ 网卡配置脚本执行失败。${NC}"
@@ -987,11 +1210,13 @@ install_reinstall_os() {
     case "$choice" in
         y|Y )
             echo -e "${BLUE}🚀 正在开始重装系统... 你的 SSH 将会断开。${NC}"
-            echo -e "执行: curl -O ... && bash reinstall.sh debian-13"
             REINSTALL_URL="https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh"
-            REINSTALL_URL=$(process_github_url "$REINSTALL_URL")
-            curl -O "$REINSTALL_URL" && bash reinstall.sh debian-13
-            echo -e "${RED}--- 如果你还看得到这条消息，说明脚本执行失败。---${NC}"
+            if safe_github_download "$REINSTALL_URL" "./reinstall.sh"; then
+                bash reinstall.sh debian-13
+            else
+                echo -e "${RED}❌ 重装脚本下载失败！${NC}"
+                echo -e "${RED}--- 如果你还看得到这条消息，说明脚本执行失败。---${NC}"
+            fi
             ;;
         * )
             echo -e "${GREEN}👍 操作已取消。${NC}"
