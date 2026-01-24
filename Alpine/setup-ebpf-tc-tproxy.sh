@@ -152,7 +152,34 @@ install_dependencies() {
     # 安装基础依赖
     local missing_deps=()
     for dep in "${deps[@]}"; do
-        if ! command -v "${dep%%:*}" >/dev/null 2>&1 && ! rpm -q "${dep%%:*}" >/dev/null 2>&1 && ! dpkg -l | grep -q "^ii.*${dep%%:*}" 2>/dev/null; then
+        local pkg_name="${dep%%:*}"
+        local is_installed=false
+        
+        # 检查命令是否存在
+        if command -v "$pkg_name" >/dev/null 2>&1; then
+            is_installed=true
+        else
+            # 根据系统类型检查包管理器
+            case "$OS_DIST" in
+                alpine)
+                    if apk info -e "$pkg_name" >/dev/null 2>&1; then
+                        is_installed=true
+                    fi
+                    ;;
+                debian)
+                    if dpkg -l | grep -q "^ii.*$pkg_name" 2>/dev/null; then
+                        is_installed=true
+                    fi
+                    ;;
+                redhat)
+                    if rpm -q "$pkg_name" >/dev/null 2>&1; then
+                        is_installed=true
+                    fi
+                    ;;
+            esac
+        fi
+        
+        if [ "$is_installed" = false ]; then
             missing_deps+=("$dep")
         fi
     done
@@ -167,9 +194,33 @@ install_dependencies() {
     local missing_build=()
     for dep in "${build_deps[@]}"; do
         local pkg_name="${dep%%:*}"
-        if ! command -v "$pkg_name" >/dev/null 2>&1 2>/dev/null && \
-           ! rpm -q "$pkg_name" >/dev/null 2>&1 && \
-           ! dpkg -l | grep -q "^ii.*$pkg_name" 2>/dev/null; then
+        local is_installed=false
+        
+        # 检查命令是否存在
+        if command -v "$pkg_name" >/dev/null 2>&1; then
+            is_installed=true
+        else
+            # 根据系统类型检查包管理器
+            case "$OS_DIST" in
+                alpine)
+                    if apk info -e "$pkg_name" >/dev/null 2>&1; then
+                        is_installed=true
+                    fi
+                    ;;
+                debian)
+                    if dpkg -l | grep -q "^ii.*$pkg_name" 2>/dev/null; then
+                        is_installed=true
+                    fi
+                    ;;
+                redhat)
+                    if rpm -q "$pkg_name" >/dev/null 2>&1; then
+                        is_installed=true
+                    fi
+                    ;;
+            esac
+        fi
+        
+        if [ "$is_installed" = false ]; then
             missing_build+=("$dep")
         fi
     done
@@ -272,9 +323,10 @@ compile_ebpf() {
     
     echo -e "${YELLOW}🔨 正在编译 eBPF 程序...${NC}"
     
-    # 创建 eBPF 源代码
+    # 创建 eBPF 源代码（第一个版本，可能被覆盖）
     cat > "$ebpf_source" <<'EOFBPF'
 #include <linux/bpf.h>
+#include <linux/pkt_cls.h>
 #include <linux/in.h>
 #include <linux/ip.h>
 #include <linux/ipv6.h>
@@ -282,6 +334,10 @@ compile_ebpf() {
 #include <linux/udp.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
+
+#ifndef TC_ACT_OK
+#define TC_ACT_OK 0
+#endif
 
 #define TPROXY_PORT 9420
 #define TPROXY_MARK 0x2333
@@ -354,12 +410,17 @@ EOFBPF
     # 简化版 eBPF 程序（仅标记，实际重定向由 TC 完成）
     cat > "$ebpf_source" <<'EOFBPF'
 #include <linux/bpf.h>
+#include <linux/pkt_cls.h>
 #include <linux/in.h>
 #include <linux/ip.h>
 #include <linux/tcp.h>
 #include <linux/udp.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
+
+#ifndef TC_ACT_OK
+#define TC_ACT_OK 0
+#endif
 
 #define TPROXY_MARK 0x2333
 
@@ -404,13 +465,22 @@ EOFBPF
         clang_flags="$clang_flags -I$kernel_headers/include"
     fi
     
-    if clang $clang_flags -c "$ebpf_source" -o "$ebpf_object" 2>&1 | tee /tmp/ebpf_compile.log; then
+    # 编译 eBPF 程序并捕获输出
+    local compile_output=$(clang $clang_flags -c "$ebpf_source" -o "$ebpf_object" 2>&1)
+    local compile_result=$?
+    
+    # 保存编译日志
+    echo "$compile_output" > /tmp/ebpf_compile.log 2>/dev/null || true
+    
+    if [ $compile_result -eq 0 ] && [ -f "$ebpf_object" ]; then
         echo -e "${GREEN}✅ eBPF 程序编译成功${NC}"
         USE_EBPF=true
         return 0
     else
         echo -e "${YELLOW}⚠️  编译失败，将使用优化版 iptables 方案${NC}"
-        cat /tmp/ebpf_compile.log 2>/dev/null || true
+        if [ -n "$compile_output" ]; then
+            echo "$compile_output" | head -10
+        fi
         USE_EBPF=false
         return 1
     fi
