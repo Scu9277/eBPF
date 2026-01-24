@@ -195,7 +195,7 @@ echo "[$(date '+%F %T')] 🔧 已启用 IPv4 转发" | tee -a "$LOG_FILE"
 
 # ---- 检测并同步 mihomo 的 routing-mark ----
 echo "[$(date '+%F %T')] 🔍 正在检测 mihomo 配置中的 routing-mark..." | tee -a "$LOG_FILE"
-local detected_mark=$(detect_mihomo_routing_mark)
+detected_mark=$(detect_mihomo_routing_mark)
 if [ "$detected_mark" != "0x2333" ]; then
     TPROXY_MARK="$detected_mark"
     echo "[$(date '+%F %T')] ✅ 检测到 mihomo routing-mark，使用: $TPROXY_MARK" | tee -a "$LOG_FILE"

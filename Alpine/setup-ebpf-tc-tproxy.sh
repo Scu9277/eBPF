@@ -655,11 +655,32 @@ else
     fi
 fi
 
-# 验证策略路由
-if ip rule show | grep -q "fwmark \$TPROXY_MARK"; then
-    log "✅ 策略路由规则已配置"
+# 验证策略路由（正确解析 ip rule show 输出）
+# ip rule show 输出格式: "32765:  from all fwmark 0x23b3 lookup 100"
+local rule_check=\$(ip rule show | grep -i "fwmark" | grep -i "\$TPROXY_MARK")
+if [ -n "\$rule_check" ]; then
+    log "✅ 策略路由规则已配置 (mark: \$TPROXY_MARK)"
 else
     log "❌ 错误：策略路由规则未找到！"
+    log "   期望的 mark: \$TPROXY_MARK"
+    local current_rules=\$(ip rule show | grep -i "fwmark" || echo "无")
+    log "   当前规则: \$current_rules"
+    # 尝试重新添加
+    log "   尝试重新添加策略路由规则..."
+    ip rule del fwmark \$TPROXY_MARK table \$TABLE_ID 2>/dev/null || true
+    sleep 1
+    if ip rule add fwmark \$TPROXY_MARK table \$TABLE_ID 2>&1; then
+        log "   ✅ 策略路由规则重新添加成功"
+        # 再次验证
+        sleep 1
+        if ip rule show | grep -i "fwmark" | grep -i "\$TPROXY_MARK" >/dev/null 2>&1; then
+            log "   ✅ 策略路由规则验证成功"
+        else
+            log "   ⚠️  策略路由规则添加成功但验证失败，可能需要重启服务"
+        fi
+    else
+        log "   ❌ 策略路由规则重新添加失败"
+    fi
 fi
 
 if ip route show table \$TABLE_ID 2>/dev/null | grep -q "local default"; then

@@ -1374,13 +1374,20 @@ install_tproxy() {
                 echo -e "   ${GREEN}✅ fwmark $expected_mark 规则已配置${NC}"
             else
                 echo -e "   ${RED}❌ fwmark $expected_mark 规则未找到！${NC}"
-                # 显示当前配置的 mark
-                local current_mark=$(ip rule show | grep "fwmark" | head -1 | awk '{print $NF}' | cut -d' ' -f1)
+                # 显示当前配置的 mark（正确解析 ip rule show 输出）
+                # ip rule show 输出格式: "32765:  from all fwmark 0x23b3 lookup 100"
+                local current_mark=$(ip rule show | grep "fwmark" | head -1 | grep -oE "fwmark 0x[0-9a-fA-F]+" | awk '{print $2}')
                 if [ -n "$current_mark" ]; then
                     echo -e "   ${YELLOW}   当前配置的 mark: $current_mark${NC}"
-                    if [ "$current_mark" != "$expected_mark" ]; then
+                    # 转换为大写进行比较
+                    local current_mark_upper=$(echo "$current_mark" | tr '[:lower:]' '[:upper:]')
+                    local expected_mark_upper=$(echo "$expected_mark" | tr '[:lower:]' '[:upper:]')
+                    if [ "$current_mark_upper" != "$expected_mark_upper" ]; then
                         echo -e "   ${RED}   ⚠️  mark 值不匹配！这会导致流量无法正确路由${NC}"
+                        echo -e "   ${YELLOW}   需要: $expected_mark, 当前: $current_mark${NC}"
                     fi
+                else
+                    echo -e "   ${YELLOW}   未找到任何 fwmark 规则${NC}"
                 fi
             fi
             if ip route show table 100 2>/dev/null | grep -q "local default"; then
@@ -1503,10 +1510,18 @@ install_tproxy() {
                         fi
                     fi
                     
+                    # 清理所有旧的策略路由规则（包括可能的错误 mark）
+                    echo -e "${YELLOW}  - 清理旧的策略路由规则...${NC}"
+                    ip rule show | grep "fwmark" | while read rule; do
+                        local old_mark=$(echo "$rule" | grep -oE "fwmark 0x[0-9a-fA-F]+" | awk '{print $2}')
+                        if [ -n "$old_mark" ]; then
+                            ip rule del fwmark "$old_mark" table 100 2>/dev/null || true
+                        fi
+                    done
+                    ip route flush table 100 2>/dev/null || true
+                    
                     # 修复策略路由
                     echo -e "${YELLOW}  - 修复策略路由 (使用 mark: $fix_mark)...${NC}"
-                    ip rule del fwmark "$fix_mark" table 100 2>/dev/null || true
-                    ip route flush table 100 2>/dev/null || true
                     if ip rule add fwmark "$fix_mark" table 100 2>/dev/null; then
                         echo -e "${GREEN}    ✅ 策略路由规则已添加${NC}"
                     else
@@ -1517,6 +1532,15 @@ install_tproxy() {
                         echo -e "${GREEN}    ✅ 路由表 100 已配置${NC}"
                     else
                         echo -e "${RED}    ❌ 路由表 100 配置失败${NC}"
+                    fi
+                    
+                    # 验证修复结果
+                    echo -e "${YELLOW}  - 验证修复结果...${NC}"
+                    if ip rule show | grep -q "fwmark $fix_mark"; then
+                        echo -e "${GREEN}    ✅ 策略路由规则验证成功${NC}"
+                    else
+                        echo -e "${RED}    ❌ 策略路由规则验证失败！${NC}"
+                        echo -e "${YELLOW}   当前规则: $(ip rule show | grep fwmark || echo '无')${NC}"
                     fi
                     
                     # 如果使用 eBPF 方案，重新启动服务
