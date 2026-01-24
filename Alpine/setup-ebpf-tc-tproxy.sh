@@ -519,39 +519,28 @@ else
     USE_EBPF=false
 fi
 
-# 如果 eBPF 不可用，使用优化的 iptables 规则
-if [ "\$USE_EBPF" != "true" ]; then
-    log "📋 使用传统 TC 规则配置..."
-    
-    # 创建 TC 过滤器（传统方式）
-    # 豁免 Docker 端口
-    tc filter add dev "\$MAIN_IF" ingress protocol ip prio 1 u32 \\
-        match ip dport \$DOCKER_PORT 0xffff flowid 1:1 action pass
-    
-    # 豁免本地回环
-    tc filter add dev "\$MAIN_IF" ingress protocol ip prio 2 u32 \\
-        match ip dst 127.0.0.0/8 flowid 1:1 action pass
-    
-    # 豁免局域网
-    tc filter add dev "\$MAIN_IF" ingress protocol ip prio 3 u32 \\
-        match ip dst 192.168.0.0/16 flowid 1:1 action pass
-    tc filter add dev "\$MAIN_IF" ingress protocol ip prio 4 u32 \\
-        match ip dst 10.0.0.0/8 flowid 1:1 action pass
-    tc filter add dev "\$MAIN_IF" ingress protocol ip prio 5 u32 \\
-        match ip dst 172.16.0.0/12 flowid 1:1 action pass
-    
-    # TProxy 重定向（使用 iptables 辅助）
-    # 由于 TC 本身不支持 TProxy，我们使用 iptables 配合
-    log "🔗 配置 iptables TProxy 规则..."
-    
-    # 清理旧规则
-    iptables -t mangle -D PREROUTING -j TPROXY_CHAIN 2>/dev/null || true
-    iptables -t mangle -F TPROXY_CHAIN 2>/dev/null || true
-    iptables -t mangle -X TPROXY_CHAIN 2>/dev/null || true
-    
-    # 创建新链
-    iptables -t mangle -N TPROXY_CHAIN 2>/dev/null || true
-    
+# ⚠️ 重要：无论使用 eBPF 还是 iptables，都需要配置 iptables TPROXY 规则
+# eBPF 程序只负责标记数据包，实际重定向由 iptables TPROXY 完成
+log "🔗 配置 iptables TProxy 规则..."
+
+# 清理旧规则
+iptables -t mangle -D PREROUTING -j TPROXY_CHAIN 2>/dev/null || true
+iptables -t mangle -F TPROXY_CHAIN 2>/dev/null || true
+iptables -t mangle -X TPROXY_CHAIN 2>/dev/null || true
+
+# 创建新链
+iptables -t mangle -N TPROXY_CHAIN 2>/dev/null || true
+
+# 如果使用 eBPF，只需要处理已标记的数据包（eBPF 已经处理了豁免规则）
+# 如果使用 iptables，需要完整的规则链（包含豁免规则）
+if [ "\$USE_EBPF" = "true" ]; then
+    # eBPF 模式：只处理已标记的数据包
+    # 直接重定向标记的数据包到 TProxy 端口
+    iptables -t mangle -A TPROXY_CHAIN -m mark --mark \$TPROXY_MARK -p tcp -j TPROXY --on-port \$TPROXY_PORT --tproxy-mark \$TPROXY_MARK
+    iptables -t mangle -A TPROXY_CHAIN -m mark --mark \$TPROXY_MARK -p udp -j TPROXY --on-port \$TPROXY_PORT --tproxy-mark \$TPROXY_MARK
+    log "✅ eBPF + iptables TProxy 规则配置完成"
+else
+    # iptables 模式：完整的规则链（包含豁免规则）
     # 优化规则顺序：最常用的规则优先（提升性能）
     # 1. 豁免 Docker 订阅端口（最常用，最高优先级）
     iptables -t mangle -A TPROXY_CHAIN -p tcp --dport \$DOCKER_PORT -j RETURN
@@ -576,10 +565,11 @@ if [ "\$USE_EBPF" != "true" ]; then
     # 6. TProxy 转发规则（最后匹配，作为默认规则）
     iptables -t mangle -A TPROXY_CHAIN -p tcp -j TPROXY --on-port \$TPROXY_PORT --tproxy-mark \$TPROXY_MARK
     iptables -t mangle -A TPROXY_CHAIN -p udp -j TPROXY --on-port \$TPROXY_PORT --tproxy-mark \$TPROXY_MARK
-    
-    # Hook 到 PREROUTING
-    iptables -t mangle -I PREROUTING -j TPROXY_CHAIN
+    log "✅ iptables TProxy 规则配置完成"
 fi
+
+# Hook 到 PREROUTING（无论使用 eBPF 还是 iptables）
+iptables -t mangle -I PREROUTING -j TPROXY_CHAIN
 
 # 配置策略路由
 log "🛣️  正在配置策略路由..."
@@ -657,13 +647,13 @@ fi
 
 # 验证策略路由（正确解析 ip rule show 输出）
 # ip rule show 输出格式: "32765:  from all fwmark 0x23b3 lookup 100"
-local rule_check=\$(ip rule show | grep -i "fwmark" | grep -i "\$TPROXY_MARK")
+rule_check=\$(ip rule show | grep -i "fwmark" | grep -i "\$TPROXY_MARK")
 if [ -n "\$rule_check" ]; then
     log "✅ 策略路由规则已配置 (mark: \$TPROXY_MARK)"
 else
     log "❌ 错误：策略路由规则未找到！"
     log "   期望的 mark: \$TPROXY_MARK"
-    local current_rules=\$(ip rule show | grep -i "fwmark" || echo "无")
+    current_rules=\$(ip rule show | grep -i "fwmark" || echo "无")
     log "   当前规则: \$current_rules"
     # 尝试重新添加
     log "   尝试重新添加策略路由规则..."
