@@ -349,6 +349,19 @@ compile_ebpf() {
     echo -e "${YELLOW}   使用 mark 值: $TPROXY_MARK (十进制: $mark_decimal)${NC}"
     
     # 简化版 eBPF 程序（仅标记，实际重定向由 TC 完成）
+    # 获取宿主机 IP 的十六进制表示（用于 eBPF 程序）
+    local host_ip_hex=""
+    if [ -n "$MAIN_INTERFACE" ]; then
+        local host_ip=$(ip -4 addr show "$MAIN_INTERFACE" 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d/ -f1 | head -n1)
+        if [ -n "$host_ip" ]; then
+            # 将 IP 地址转换为十六进制（例如 10.0.0.99 -> 0x0a000063）
+            local ip_parts=($(echo "$host_ip" | tr '.' ' '))
+            if [ ${#ip_parts[@]} -eq 4 ]; then
+                host_ip_hex=$(printf "0x%02x%02x%02x%02x" ${ip_parts[0]} ${ip_parts[1]} ${ip_parts[2]} ${ip_parts[3]})
+            fi
+        fi
+    fi
+    
     cat > "$ebpf_source" <<EOFBPF
 #include <linux/bpf.h>
 #include <linux/pkt_cls.h>
@@ -364,6 +377,7 @@ compile_ebpf() {
 #endif
 
 #define TPROXY_MARK $mark_decimal
+$(if [ -n "$host_ip_hex" ]; then echo "#define HOST_IP $host_ip_hex"; fi)
 
 SEC("tc")
 int tproxy_mark(struct __sk_buff *skb) {
@@ -374,17 +388,24 @@ int tproxy_mark(struct __sk_buff *skb) {
     if (data + sizeof(*ip) > data_end)
         return TC_ACT_OK;
     
-    // 跳过本地回环和局域网
     __be32 saddr = ip->saddr;
     __be32 daddr = ip->daddr;
     
-    if (saddr == 0x0100007f || // 127.0.0.1
-        (daddr & 0xff000000) == 0x0a000000 || // 10.0.0.0/8
+    // ⚠️ 重要：豁免宿主机自己发出的流量（源地址是宿主机 IP）
+$(if [ -n "$host_ip_hex" ]; then echo "    if (saddr == HOST_IP)
+        return TC_ACT_OK;"; fi)
+    
+    // 跳过本地回环
+    if (saddr == 0x0100007f || daddr == 0x0100007f) // 127.0.0.1
+        return TC_ACT_OK;
+    
+    // 跳过局域网目标地址（但允许宿主机发出的流量到外网）
+    if ((daddr & 0xff000000) == 0x0a000000 || // 10.0.0.0/8
         (daddr & 0xff000000) == 0xc0a80000 || // 192.168.0.0/16
         (daddr & 0xfff00000) == 0xac100000)   // 172.16.0.0/12
         return TC_ACT_OK;
     
-    // 标记数据包
+    // 标记数据包（只标记从其他设备发来的流量，不标记宿主机自己的流量）
     skb->mark = TPROXY_MARK;
     
     return TC_ACT_OK;
@@ -531,14 +552,29 @@ iptables -t mangle -X TPROXY_CHAIN 2>/dev/null || true
 # 创建新链
 iptables -t mangle -N TPROXY_CHAIN 2>/dev/null || true
 
+# ⚠️ 重要：即使使用 eBPF，也要在 iptables 中添加豁免规则，确保宿主机流量不被拦截
 # 如果使用 eBPF，只需要处理已标记的数据包（eBPF 已经处理了豁免规则）
 # 如果使用 iptables，需要完整的规则链（包含豁免规则）
 if [ "\$USE_EBPF" = "true" ]; then
-    # eBPF 模式：只处理已标记的数据包
-    # 直接重定向标记的数据包到 TProxy 端口
+    # eBPF 模式：添加豁免规则 + 处理已标记的数据包
+    # 1. 优先豁免宿主机自己的流量（源地址是宿主机 IP）
+    if [ -n "\$MAIN_IP" ]; then
+        iptables -t mangle -A TPROXY_CHAIN -s \$MAIN_IP -j RETURN
+        iptables -t mangle -A TPROXY_CHAIN -d \$MAIN_IP -j RETURN
+    fi
+    # 2. 豁免本地回环
+    iptables -t mangle -A TPROXY_CHAIN -d 127.0.0.0/8 -j RETURN
+    # 3. 豁免局域网
+    iptables -t mangle -A TPROXY_CHAIN -d 192.168.0.0/16 -j RETURN
+    iptables -t mangle -A TPROXY_CHAIN -d 10.0.0.0/8 -j RETURN
+    iptables -t mangle -A TPROXY_CHAIN -d 172.16.0.0/12 -j RETURN
+    # 4. 豁免 Docker 端口
+    iptables -t mangle -A TPROXY_CHAIN -p tcp --dport \$DOCKER_PORT -j RETURN
+    iptables -t mangle -A TPROXY_CHAIN -p udp --dport \$DOCKER_PORT -j RETURN
+    # 5. 处理已标记的数据包（eBPF 标记的）
     iptables -t mangle -A TPROXY_CHAIN -m mark --mark \$TPROXY_MARK -p tcp -j TPROXY --on-port \$TPROXY_PORT --tproxy-mark \$TPROXY_MARK
     iptables -t mangle -A TPROXY_CHAIN -m mark --mark \$TPROXY_MARK -p udp -j TPROXY --on-port \$TPROXY_PORT --tproxy-mark \$TPROXY_MARK
-    log "✅ eBPF + iptables TProxy 规则配置完成"
+    log "✅ eBPF + iptables TProxy 规则配置完成（包含宿主机豁免规则）"
 else
     # iptables 模式：完整的规则链（包含豁免规则）
     # 优化规则顺序：最常用的规则优先（提升性能）
