@@ -487,6 +487,21 @@ log() {
 
 log "🚀 开始配置 eBPF TC TProxy..."
 
+# ⚠️ 重要：检查 mihomo 是否运行
+log "🔍 正在检查 mihomo 服务状态..."
+if command -v systemctl >/dev/null 2>&1; then
+    if ! systemctl is-active --quiet mihomo.service 2>/dev/null; then
+        log "❌ 错误：mihomo 服务未运行！请先启动 mihomo 服务"
+        exit 1
+    fi
+elif command -v rc-service >/dev/null 2>&1; then
+    if ! rc-service mihomo status >/dev/null 2>&1; then
+        log "❌ 错误：mihomo 服务未运行！请先启动 mihomo 服务"
+        exit 1
+    fi
+fi
+log "✅ mihomo 服务正在运行"
+
 # 加载必要的内核模块（TProxy 必需）
 log "📦 正在加载内核模块..."
 for mod in xt_TPROXY nf_tproxy_ipv4; do
@@ -563,51 +578,89 @@ log "🔗 配置 iptables TProxy 规则..."
 # 如果使用 iptables，需要完整的规则链（包含豁免规则）
 if [ "\$USE_EBPF" = "true" ]; then
     # eBPF 模式：添加豁免规则 + 处理已标记的数据包
-    # 1. 优先豁免宿主机自己的流量（源地址是宿主机 IP）
+    # ⚠️ 重要：优先豁免宿主机流量，确保宿主机网络不受影响
+    
+    # 1. 豁免宿主机发出的流量（源地址是宿主机 IP）- 最高优先级
     if [ -n "\$MAIN_IP" ]; then
         \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -s \$MAIN_IP -j RETURN
-        \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -d \$MAIN_IP -j RETURN
+        log "✅ 已豁免宿主机发出的流量 (源: \$MAIN_IP)"
     fi
-    # 2. 豁免本地回环
-    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -d 127.0.0.0/8 -j RETURN
-    # 3. 豁免局域网
-    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -d 192.168.0.0/16 -j RETURN
-    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -d 10.0.0.0/8 -j RETURN
-    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -d 172.16.0.0/12 -j RETURN
-    # 4. 豁免 Docker 端口
-    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp --dport \$DOCKER_PORT -j RETURN
-    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p udp --dport \$DOCKER_PORT -j RETURN
-    # 5. 处理已标记的数据包（eBPF 标记的）
-    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -m mark --mark \$TPROXY_MARK -p tcp -j TPROXY --on-port \$TPROXY_PORT --tproxy-mark \$TPROXY_MARK
-    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -m mark --mark \$TPROXY_MARK -p udp -j TPROXY --on-port \$TPROXY_PORT --tproxy-mark \$TPROXY_MARK
-    log "✅ eBPF + iptables TProxy 规则配置完成（包含宿主机豁免规则）"
-else
-    # iptables 模式：完整的规则链（包含豁免规则）
-    # 优化规则顺序：最常用的规则优先（提升性能）
-    # 1. 豁免 Docker 订阅端口（最常用，最高优先级）
-    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp --dport \$DOCKER_PORT -j RETURN
-    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p udp --dport \$DOCKER_PORT -j RETURN
     
-    # 2. 豁免本地回环（127.0.0.0/8，最常用）
-    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -d 127.0.0.0/8 -j RETURN
-    
-    # 3. 豁免局域网网段（按使用频率排序）
-    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -d 192.168.0.0/16 -j RETURN
-    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -d 10.0.0.0/8 -j RETURN
-    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -d 172.16.0.0/12 -j RETURN
-    
-    # 4. 豁免广播地址
-    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -d 255.255.255.255 -j RETURN
-    
-    # 5. 豁免服务器本身的 IP（如果检测到）
+    # 2. 豁免发往宿主机的流量（目标地址是宿主机 IP）- 放行入站流量转发
     if [ -n "\$MAIN_IP" ]; then
         \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -d \$MAIN_IP -j RETURN
+        log "✅ 已豁免发往宿主机的流量 (目标: \$MAIN_IP)"
     fi
     
-    # 6. TProxy 转发规则（最后匹配，作为默认规则）
+    # 3. 豁免宿主机常用端口（SSH 22, HTTP 80, HTTPS 443, Mihomo UI 9090等）
+    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp --dport 22 -j RETURN    # SSH
+    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp --dport 80 -j RETURN    # HTTP
+    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp --dport 443 -j RETURN   # HTTPS
+    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp --dport 9090 -j RETURN  # Mihomo UI
+    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp --dport \$TPROXY_PORT -j RETURN  # TProxy 端口
+    log "✅ 已豁免宿主机常用端口 (22, 80, 443, 9090, \$TPROXY_PORT)"
+    
+    # 4. 豁免本地回环
+    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -d 127.0.0.0/8 -j RETURN
+    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -s 127.0.0.0/8 -j RETURN
+    
+    # 5. 豁免局域网（但允许转发到外网）
+    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -d 192.168.0.0/16 -j RETURN
+    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -d 10.0.0.0/8 -j RETURN
+    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -d 172.16.0.0/12 -j RETURN
+    
+    # 6. 豁免 Docker 端口
+    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp --dport \$DOCKER_PORT -j RETURN
+    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p udp --dport \$DOCKER_PORT -j RETURN
+    
+    # 7. 处理已标记的数据包（eBPF 标记的）- 只处理从其他设备发来的流量
+    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -m mark --mark \$TPROXY_MARK -p tcp -j TPROXY --on-port \$TPROXY_PORT --tproxy-mark \$TPROXY_MARK
+    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -m mark --mark \$TPROXY_MARK -p udp -j TPROXY --on-port \$TPROXY_PORT --tproxy-mark \$TPROXY_MARK
+    log "✅ eBPF + iptables TProxy 规则配置完成（包含完整的宿主机豁免规则）"
+else
+    # iptables 模式：完整的规则链（包含豁免规则）
+    # ⚠️ 重要：优化规则顺序，优先豁免宿主机流量
+    
+    # 1. 豁免宿主机发出的流量（源地址是宿主机 IP）- 最高优先级
+    if [ -n "\$MAIN_IP" ]; then
+        \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -s \$MAIN_IP -j RETURN
+        log "✅ 已豁免宿主机发出的流量 (源: \$MAIN_IP)"
+    fi
+    
+    # 2. 豁免发往宿主机的流量（目标地址是宿主机 IP）- 放行入站流量转发
+    if [ -n "\$MAIN_IP" ]; then
+        \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -d \$MAIN_IP -j RETURN
+        log "✅ 已豁免发往宿主机的流量 (目标: \$MAIN_IP)"
+    fi
+    
+    # 3. 豁免宿主机常用端口（SSH 22, HTTP 80, HTTPS 443, Mihomo UI 9090等）
+    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp --dport 22 -j RETURN    # SSH
+    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp --dport 80 -j RETURN    # HTTP
+    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp --dport 443 -j RETURN   # HTTPS
+    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp --dport 9090 -j RETURN  # Mihomo UI
+    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp --dport \$TPROXY_PORT -j RETURN  # TProxy 端口
+    log "✅ 已豁免宿主机常用端口 (22, 80, 443, 9090, \$TPROXY_PORT)"
+    
+    # 4. 豁免 Docker 订阅端口
+    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp --dport \$DOCKER_PORT -j RETURN
+    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p udp --dport \$DOCKER_PORT -j RETURN
+    
+    # 5. 豁免本地回环（127.0.0.0/8，最常用）
+    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -d 127.0.0.0/8 -j RETURN
+    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -s 127.0.0.0/8 -j RETURN
+    
+    # 6. 豁免局域网网段（按使用频率排序）
+    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -d 192.168.0.0/16 -j RETURN
+    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -d 10.0.0.0/8 -j RETURN
+    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -d 172.16.0.0/12 -j RETURN
+    
+    # 7. 豁免广播地址
+    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -d 255.255.255.255 -j RETURN
+    
+    # 8. TProxy 转发规则（最后匹配，作为默认规则）
     \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp -j TPROXY --on-port \$TPROXY_PORT --tproxy-mark \$TPROXY_MARK
     \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p udp -j TPROXY --on-port \$TPROXY_PORT --tproxy-mark \$TPROXY_MARK
-    log "✅ iptables TProxy 规则配置完成"
+    log "✅ iptables TProxy 规则配置完成（包含完整的宿主机豁免规则）"
 fi
 
 # Hook 到 PREROUTING（无论使用 eBPF 还是 iptables）
@@ -745,18 +798,38 @@ error_log="/var/log/ebpf-tproxy-service.log"
 
 depend() {
     need net
-    after firewall
+    need mihomo
+    after firewall mihomo
     before local
 }
 
 start() {
     ebegin "Starting eBPF TC TProxy service"
-    # 等待网络就绪
+    
+    # 1. 检查 mihomo 服务是否运行
+    if ! rc-service mihomo status >/dev/null 2>&1; then
+        eend 1 "Mihomo service is not running. Please start mihomo first."
+        return 1
+    fi
+    
+    # 2. 等待网络就绪
     sleep 3
-    # 确保内核模块已加载
+    
+    # 3. 等待 mihomo 完全启动（延迟30秒）
+    ebegin "Waiting for mihomo to be ready (30s delay)..."
+    sleep 30
+    
+    # 4. 再次检查 mihomo 是否仍在运行
+    if ! rc-service mihomo status >/dev/null 2>&1; then
+        eend 1 "Mihomo service stopped. Aborting TProxy startup."
+        return 1
+    fi
+    
+    # 5. 确保内核模块已加载
     modprobe xt_TPROXY 2>/dev/null || true
     modprobe nf_tproxy_ipv4 2>/dev/null || true
-    # 执行配置脚本
+    
+    # 6. 执行配置脚本
     if \$command; then
         eend 0
     else
@@ -779,13 +852,20 @@ EOFRC
         cat > "$SERVICE_FILE" <<EOFSD
 [Unit]
 Description=eBPF TC TProxy Service
-After=network-online.target
+After=network-online.target mihomo.service
 Wants=network-online.target
+Requires=mihomo.service
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStartPre=/bin/sleep 3
+# 检查 mihomo 是否运行
+ExecStartPre=/bin/bash -c 'systemctl is-active --quiet mihomo.service || exit 1'
+# 等待 mihomo 完全启动（延迟30秒）
+ExecStartPre=/bin/sleep 30
+# 再次检查 mihomo 是否仍在运行
+ExecStartPre=/bin/bash -c 'systemctl is-active --quiet mihomo.service || exit 1'
+# 加载内核模块
 ExecStartPre=/sbin/modprobe xt_TPROXY || true
 ExecStartPre=/sbin/modprobe nf_tproxy_ipv4 || true
 ExecStart=$EBPF_SCRIPT

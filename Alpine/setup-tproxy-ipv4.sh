@@ -218,6 +218,21 @@ CHAIN_NAME="$CUSTOM_CHAIN"
 
 echo "[$(date '+%F %T')] 开始加载 IPv4 TProxy 规则 (链: \$CHAIN_NAME)..." | tee -a "\$LOG_FILE"
 
+# ⚠️ 重要：检查 mihomo 是否运行
+echo "[$(date '+%F %T')] 🔍 正在检查 mihomo 服务状态..." | tee -a "\$LOG_FILE"
+if command -v systemctl >/dev/null 2>&1; then
+    if ! systemctl is-active --quiet mihomo.service 2>/dev/null; then
+        echo "[$(date '+%F %T')] ❌ 错误：mihomo 服务未运行！请先启动 mihomo 服务" | tee -a "\$LOG_FILE"
+        exit 1
+    fi
+elif command -v rc-service >/dev/null 2>&1; then
+    if ! rc-service mihomo status >/dev/null 2>&1; then
+        echo "[$(date '+%F %T')] ❌ 错误：mihomo 服务未运行！请先启动 mihomo 服务" | tee -a "\$LOG_FILE"
+        exit 1
+    fi
+fi
+echo "[$(date '+%F %T')] ✅ mihomo 服务正在运行" | tee -a "\$LOG_FILE"
+
 # 检测主网卡（兼容 BusyBox，不使用 -P 选项）
 MAIN_IF=\$(ip -4 route show default 2>/dev/null | grep -o 'dev [^ ]*' | awk '{print \$2}' | head -n1)
 if [ -z "\$MAIN_IF" ]; then
@@ -251,29 +266,47 @@ ip route flush table \$TABLE_ID 2>/dev/null || true
 # ---- 创建新链 ----
 iptables -t mangle -N \$CHAIN_NAME
 
-# ---- 规则详情（优化顺序：最常用的规则优先） ----
+# ---- 规则详情（优化顺序：优先豁免宿主机流量） ----
 
-# 1. 优先豁免 Docker 订阅端口 9277（最常用，放在最前面）
+# ⚠️ 重要：优先豁免宿主机流量，确保宿主机网络不受影响
+
+# 1. 豁免宿主机发出的流量（源地址是宿主机 IP）- 最高优先级
+if [ -n "\$MAIN_IP" ]; then
+    iptables -t mangle -A \$CHAIN_NAME -s \$MAIN_IP -j RETURN
+    echo "[$(date '+%F %T')] ✅ 已豁免宿主机发出的流量 (源: \$MAIN_IP)" | tee -a "\$LOG_FILE"
+fi
+
+# 2. 豁免发往宿主机的流量（目标地址是宿主机 IP）- 放行入站流量转发
+if [ -n "\$MAIN_IP" ]; then
+    iptables -t mangle -A \$CHAIN_NAME -d \$MAIN_IP -j RETURN
+    echo "[$(date '+%F %T')] ✅ 已豁免发往宿主机的流量 (目标: \$MAIN_IP)" | tee -a "\$LOG_FILE"
+fi
+
+# 3. 豁免宿主机常用端口（SSH 22, HTTP 80, HTTPS 443, Mihomo UI 9090等）
+iptables -t mangle -A \$CHAIN_NAME -p tcp --dport 22 -j RETURN    # SSH
+iptables -t mangle -A \$CHAIN_NAME -p tcp --dport 80 -j RETURN    # HTTP
+iptables -t mangle -A \$CHAIN_NAME -p tcp --dport 443 -j RETURN    # HTTPS
+iptables -t mangle -A \$CHAIN_NAME -p tcp --dport 9090 -j RETURN   # Mihomo UI
+iptables -t mangle -A \$CHAIN_NAME -p tcp --dport \$TPROXY_PORT -j RETURN  # TProxy 端口
+echo "[$(date '+%F %T')] ✅ 已豁免宿主机常用端口 (22, 80, 443, 9090, \$TPROXY_PORT)" | tee -a "\$LOG_FILE"
+
+# 4. 豁免 Docker 订阅端口 9277
 iptables -t mangle -A \$CHAIN_NAME -p tcp --dport \$DOCKER_PORT -j RETURN
 iptables -t mangle -A \$CHAIN_NAME -p udp --dport \$DOCKER_PORT -j RETURN
 
-# 2. 豁免本地回环（127.0.0.0/8，最常用）
+# 5. 豁免本地回环（127.0.0.0/8，最常用）
 iptables -t mangle -A \$CHAIN_NAME -d 127.0.0.0/8 -j RETURN
+iptables -t mangle -A \$CHAIN_NAME -s 127.0.0.0/8 -j RETURN
 
-# 3. 豁免局域网网段（按使用频率排序：192.168 > 10.0 > 172.16）
+# 6. 豁免局域网网段（按使用频率排序：192.168 > 10.0 > 172.16）
 iptables -t mangle -A \$CHAIN_NAME -d 192.168.0.0/16 -j RETURN
 iptables -t mangle -A \$CHAIN_NAME -d 10.0.0.0/8 -j RETURN
 iptables -t mangle -A \$CHAIN_NAME -d 172.16.0.0/12 -j RETURN
 
-# 4. 豁免广播地址
+# 7. 豁免广播地址
 iptables -t mangle -A \$CHAIN_NAME -d 255.255.255.255 -j RETURN
 
-# 5. 豁免服务器本身的 IP（如果检测到）
-if [ -n "\$MAIN_IP" ]; then
-    iptables -t mangle -A \$CHAIN_NAME -d \$MAIN_IP -j RETURN
-fi
-
-# 6. 添加 TProxy 转发（最后匹配，作为默认规则）
+# 8. 添加 TProxy 转发（最后匹配，作为默认规则）
 # 注意：mangle 表不支持 REJECT，如果需要阻止 UDP 443，应该在 filter 表中处理
 # 这里直接转发所有 TCP 和 UDP 流量到 TProxy
 iptables -t mangle -A \$CHAIN_NAME -p tcp -j TPROXY --on-port \$TPROXY_PORT --tproxy-mark \$TPROXY_MARK
@@ -308,18 +341,39 @@ error_log="/var/log/tproxy-service.log"
 
 depend() {
     need net
-    after firewall
+    need mihomo
+    after firewall mihomo
     before local
 }
 
 start() {
     ebegin "Starting TProxy service"
-    # 等待网络就绪
+    
+    # 1. 检查 mihomo 服务是否运行
+    if ! rc-service mihomo status >/dev/null 2>&1; then
+        eend 1 "Mihomo service is not running. Please start mihomo first."
+        return 1
+    fi
+    
+    # 2. 等待网络就绪
+    sleep 3
+    
+    # 3. 等待 mihomo 完全启动（延迟30秒）
+    ebegin "Waiting for mihomo to be ready (30s delay)..."
     sleep 30
+    
+    # 4. 再次检查 mihomo 是否仍在运行
+    if ! rc-service mihomo status >/dev/null 2>&1; then
+        eend 1 "Mihomo service stopped. Aborting TProxy startup."
+        return 1
+    fi
+    
+    # 5. 执行配置脚本
     if \$command; then
         eend 0
     else
         eend 1
+        return 1
     fi
 }
 
@@ -350,14 +404,20 @@ else
   cat > "$SERVICE_FILE" <<EOF
 [Unit]
 Description=Sing-box IPv4 TProxy Redirect Service (Gateway Mode)
-After=network-online.target
+After=network-online.target mihomo.service
 Wants=network-online.target
+Requires=mihomo.service
 
 [Service]
 Type=oneshot
-ExecStartPre=/bin/sleep 30
-ExecStart=$TPROXY_SCRIPT
 RemainAfterExit=yes
+# 检查 mihomo 是否运行
+ExecStartPre=/bin/bash -c 'systemctl is-active --quiet mihomo.service || exit 1'
+# 等待 mihomo 完全启动（延迟30秒）
+ExecStartPre=/bin/sleep 30
+# 再次检查 mihomo 是否仍在运行
+ExecStartPre=/bin/bash -c 'systemctl is-active --quiet mihomo.service || exit 1'
+ExecStart=$TPROXY_SCRIPT
 
 [Install]
 WantedBy=multi-user.target
