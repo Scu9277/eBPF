@@ -721,24 +721,29 @@ if [ -n "$MAIN_IP" ]; then
     log "✅ 已豁免宿主机发出的流量 (源: $MAIN_IP)"
 fi
 
-# 3. 豁免宿主机服务端口 (22, 53, 123, 80, 443, 9090, 9420)
+# 3. 豁免宿主机服务端口 (22, 123, 80, 443, 9090, 9420)
 $IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp --dport 22 -j RETURN    # SSH
-$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p udp --dport 53 -j RETURN    # DNS
-$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp --dport 53 -j RETURN    # DNS
 $IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p udp --dport 123 -j RETURN   # NTP (防止回环)
 $IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp --dport 80 -j RETURN    # HTTP
 $IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp --dport 443 -j RETURN   # HTTPS
 $IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp --dport 9090 -j RETURN  # Mihomo UI
 $IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp --dport $TPROXY_PORT -j RETURN  # TProxy 端口
-log "✅ 已豁免宿主机服务端口 (22, 53, 123, 80, 443, 9090, $TPROXY_PORT)"
+log "✅ 已豁免宿主机服务端口 (22, 123, 80, 443, 9090, $TPROXY_PORT)"
 
 # 4. 豁免 Docker 端口
 $IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp --dport $DOCKER_PORT -j RETURN
 $IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p udp --dport $DOCKER_PORT -j RETURN
 
-# 5. 豁免局域网目标地址（避免代理内网流量）
+# 5. 豁免局域网目标地址 (精确检测)
+LAN_SUBNET=$(ip -4 addr show "$MAIN_IF" 2>/dev/null | grep 'inet ' | awk '{print $2}' | head -n1)
+if [ -n "$LAN_SUBNET" ]; then
+    $IPTABLES_CMD -t mangle -A TPROXY_CHAIN -d $LAN_SUBNET -j RETURN
+    log "✅ 已豁免局域网网段: $LAN_SUBNET"
+fi
+
+# 常用私有网段豁免 (补漏)
 $IPTABLES_CMD -t mangle -A TPROXY_CHAIN -d 192.168.0.0/16 -j RETURN
-$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -d 10.0.0.0/8 -j RETURN
+# $IPTABLES_CMD -t mangle -A TPROXY_CHAIN -d 10.0.0.0/8 -j RETURN  # 过宽，可能冲突
 $IPTABLES_CMD -t mangle -A TPROXY_CHAIN -d 172.16.0.0/12 -j RETURN
 $IPTABLES_CMD -t mangle -A TPROXY_CHAIN -d 255.255.255.255 -j RETURN
 

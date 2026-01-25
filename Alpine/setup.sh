@@ -1137,10 +1137,18 @@ cleanup_old_tproxy() {
             systemctl disable ebpf-tproxy.service 2>/dev/null || true
             cleaned=true
         fi
-        # 如果清理了服务，重新加载 systemd
         if [ "$cleaned" = true ]; then
             systemctl daemon-reload 2>/dev/null || true
         fi
+    fi
+    
+    # 6. 删除配置目录和残留文件 (彻底清除检测标志)
+    if [ -d "/etc/tproxy" ] || [ -d "/etc/ebpf-tc-tproxy" ] || [ -f "/etc/init.d/tproxy" ] || [ -f "/etc/init.d/ebpf-tproxy" ]; then
+        echo -e "${YELLOW}  - 删除 TProxy 配置目录和系统服务文件...${NC}"
+        rm -rf /etc/tproxy /etc/ebpf-tc-tproxy 2>/dev/null || true
+        rm -f /etc/init.d/tproxy /etc/init.d/ebpf-tproxy 2>/dev/null || true
+        rm -f /etc/systemd/system/tproxy.service /etc/systemd/system/ebpf-tproxy.service 2>/dev/null || true
+        cleaned=true
     fi
     
     if [ "$cleaned" = true ]; then

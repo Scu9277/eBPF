@@ -335,16 +335,14 @@ if [ -n "$MAIN_IP" ]; then
     log "✅ 已豁免宿主机发出的流量 (源: $MAIN_IP)"
 fi
 
-# 3. 豁免宿主机服务端口 (22, 53, 80, 443, 123, 9090, 9420)
+# 3. 豁免宿主机服务端口 (22, 123, 80, 443, 9090, 9420)
 iptables -t mangle -A $CHAIN_NAME -p tcp --dport 22 -j RETURN    # SSH
-iptables -t mangle -A $CHAIN_NAME -p udp --dport 53 -j RETURN    # DNS
-iptables -t mangle -A $CHAIN_NAME -p tcp --dport 53 -j RETURN    # DNS
 iptables -t mangle -A $CHAIN_NAME -p udp --dport 123 -j RETURN   # NTP (防止海量回环)
 iptables -t mangle -A $CHAIN_NAME -p tcp --dport 80 -j RETURN    # HTTP
 iptables -t mangle -A $CHAIN_NAME -p tcp --dport 443 -j RETURN   # HTTPS
 iptables -t mangle -A $CHAIN_NAME -p tcp --dport 9090 -j RETURN  # Mihomo UI
 iptables -t mangle -A $CHAIN_NAME -p tcp --dport $TPROXY_PORT -j RETURN  # TProxy 端口
-log "✅ 已豁免宿主机服务端口 (22, 53, 123, 80, 443, 9090, $TPROXY_PORT)"
+log "✅ 已豁免宿主机服务端口 (22, 123, 80, 443, 9090, $TPROXY_PORT)"
 
 # 4. 豁免 Docker 订阅端口
 iptables -t mangle -A $CHAIN_NAME -p tcp --dport $DOCKER_PORT -j RETURN
