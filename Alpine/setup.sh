@@ -1151,6 +1151,137 @@ cleanup_old_tproxy() {
     echo ""
 }
 
+# ---- 诊断当前方案 ----
+diagnose_tproxy() {
+    # 重新检测当前方案
+    local current_info=$(detect_current_tproxy)
+    local current_scheme=$(echo "$current_info" | cut -d'|' -f1)
+    local status_info=$(echo "$current_info" | cut -d'|' -f2)
+    
+    echo -e "${YELLOW}🔍 正在诊断 TProxy 配置状态...${NC}"
+    if [ "$current_scheme" != "none" ]; then
+        local scheme_name=""
+        case "$current_scheme" in
+            iptables) scheme_name="传统 iptables TProxy" ;;
+            ebpf-v2) scheme_name="高性能 eBPF TC TProxy v2.0" ;;
+            ebpf-old) scheme_name="旧版 eBPF TC TProxy" ;;
+        esac
+        echo -e "${GREEN}📊 当前方案: ${BLUE}$scheme_name${NC} ${status_info}"
+    else
+        echo -e "${YELLOW}ℹ️  当前未检测到已安装的 TProxy 方案${NC}"
+    fi
+    echo ""
+    
+    # 1. 内核模块检查
+    echo -e "${CYAN}1. 内核模块检查:${NC}"
+    if lsmod | grep -q "xt_TPROXY"; then
+        echo -e "   ${GREEN}✅ xt_TPROXY 模块已加载${NC}"
+    else
+        echo -e "   ${RED}❌ xt_TPROXY 模块未加载${NC}"
+        echo -e "   ${YELLOW}   尝试加载: modprobe xt_TPROXY${NC}"
+        modprobe xt_TPROXY 2>/dev/null && echo -e "   ${GREEN}✅ 模块加载成功${NC}" || echo -e "   ${RED}❌ 模块加载失败${NC}"
+    fi
+    
+    # 2. iptables 规则检查
+    echo ""
+    echo -e "${CYAN}2. iptables 规则检查:${NC}"
+    if iptables -t mangle -L TPROXY_CHAIN >/dev/null 2>&1; then
+        echo -e "   ${GREEN}✅ TPROXY_CHAIN 链存在${NC}"
+        if iptables -t mangle -L PREROUTING -n | grep -q "TPROXY_CHAIN"; then
+            echo -e "   ${GREEN}✅ PREROUTING 跳转规则已配置${NC}"
+        else
+            echo -e "   ${RED}❌ PREROUTING 跳转规则未找到！${NC}"
+        fi
+        echo -e "   ${YELLOW}   规则数量: $(iptables -t mangle -L TPROXY_CHAIN | grep -c '^[A-Z]' || echo 0)${NC}"
+    else
+        echo -e "   ${YELLOW}⚠️  TPROXY_CHAIN 链不存在（可能使用 eBPF 方案）${NC}"
+    fi
+    
+    # 3. TC eBPF
+    echo ""
+    echo -e "${CYAN}3. TC eBPF 检查:${NC}"
+    local MAIN_IF=$(ip -4 route show default 2>/dev/null | grep -o 'dev [^ ]*' | awk '{print $2}' | head -n1)
+    [ -z "$MAIN_IF" ] && MAIN_IF=$(ip -4 link show 2>/dev/null | grep -E '^[0-9]+:' | grep -v 'lo:' | head -n1 | awk -F': ' '{print $2}' | awk '{print $1}')
+    if [ -n "$MAIN_IF" ]; then
+        if tc qdisc show dev "$MAIN_IF" 2>/dev/null | grep -q "clsact"; then
+            echo -e "   ${GREEN}✅ clsact qdisc 已创建 (接口: $MAIN_IF)${NC}"
+            if tc filter show dev "$MAIN_IF" ingress 2>/dev/null | grep -q "bpf"; then
+                echo -e "   ${GREEN}✅ eBPF 程序已加载${NC}"
+            else
+                echo -e "   ${YELLOW}⚠️  eBPF 程序未加载（可能使用 iptables 方案）${NC}"
+            fi
+        else
+            echo -e "   ${YELLOW}⚠️  clsact qdisc 不存在（可能使用 iptables 方案）${NC}"
+        fi
+    else
+        echo -e "   ${RED}❌ 无法检测主网络接口${NC}"
+    fi
+    
+    # 4. 策略路由检查
+    echo ""
+    echo -e "${CYAN}4. 策略路由检查:${NC}"
+    local mihomo_config="/etc/mihomo/config.yaml"
+    local expected_mark="0x2333"
+    if [ -f "$mihomo_config" ]; then
+        local mihomo_mark=$(grep -E "^routing-mark:" "$mihomo_config" 2>/dev/null | awk '{print $2}' | tr -d ' ' | head -n1)
+        if [ -n "$mihomo_mark" ] && [[ "$mihomo_mark" =~ ^[0-9]+$ ]]; then
+            expected_mark=$(printf "0x%X" "$mihomo_mark" 2>/dev/null || echo "0x2333")
+        fi
+    fi
+    
+    if ip rule show | grep -qi "fwmark $expected_mark"; then
+        echo -e "   ${GREEN}✅ fwmark $expected_mark 规则已配置${NC}"
+    else
+        echo -e "   ${RED}❌ fwmark $expected_mark 规则未找到！${NC}"
+        local current_mark=$(ip rule show | grep "fwmark" | head -1 | grep -oE "fwmark 0x[0-9a-fA-F]+" | awk '{print $2}' || echo "")
+        if [ -n "$current_mark" ]; then
+            echo -e "   ${YELLOW}   当前配置的 mark: $current_mark${NC}"
+            local current_mark_upper=$(echo "$current_mark" | tr '[:lower:]' '[:upper:]')
+            local expected_mark_upper=$(echo "$expected_mark" | tr '[:lower:]' '[:upper:]')
+            if [ "$current_mark_upper" != "$expected_mark_upper" ]; then
+                echo -e "   ${RED}   ⚠️  mark 值不匹配！这会导致流量无法正确路由${NC}"
+                echo -e "   ${YELLOW}   需要: $expected_mark, 当前: $current_mark${NC}"
+            fi
+        fi
+    fi
+    
+    if ip route show table 100 2>/dev/null | grep -q "local default"; then
+        echo -e "   ${GREEN}✅ 路由表 100 已配置${NC}"
+    else
+        echo -e "   ${RED}❌ 路由表 100 未配置！${NC}"
+    fi
+    
+    # 5. IP 转发
+    echo ""
+    echo -e "${CYAN}5. 系统配置检查:${NC}"
+    if [ "$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null)" = "1" ]; then
+        echo -e "   ${GREEN}✅ IPv4 转发已启用${NC}"
+    else
+        echo -e "   ${RED}❌ IPv4 转发未启用！${NC}"
+    fi
+    
+    # 6. 日志
+    echo ""
+    echo -e "${CYAN}6. 日志文件:${NC}"
+    if [ -f /var/log/ebpf-tproxy.log ]; then
+        echo -e "   ${GREEN}✅ eBPF 日志存在${NC}"
+    fi
+    if [ -f /var/log/tproxy.log ]; then
+        echo -e "   ${GREEN}✅ iptables 日志存在${NC}"
+    fi
+    
+    # 7. 自动修复提示
+    local has_issues=false
+    if ! ip rule show | grep -qiE "fwmark (0x2333|0x23B3|0x23b3|9139)" || ! ip route show table 100 2>/dev/null | grep -q "local default"; then
+        has_issues=true
+    fi
+    
+    if [ "$has_issues" = true ]; then
+        echo ""
+        echo -e "${YELLOW}⚠️  检测到关键配置异常！建议执行 TProxy 清理后重新安装。${NC}"
+    fi
+}
+
 install_tproxy() {
     echo -e "${BLUE}--- 正在安装 [组件 5: TProxy] ---${NC}"
     
@@ -1295,318 +1426,7 @@ install_tproxy() {
             fi
             ;;
         4)
-            # 诊断功能：只检查状态，不修改任何配置
-            # 重新检测当前方案（确保使用最新状态）
-            local current_info=$(detect_current_tproxy)
-            local current_scheme=$(echo "$current_info" | cut -d'|' -f1)
-            local status_info=$(echo "$current_info" | cut -d'|' -f2)
-            
-            echo -e "${YELLOW}🔍 正在诊断 TProxy 配置状态...${NC}"
-            if [ "$current_scheme" != "none" ]; then
-                local scheme_name=""
-                case "$current_scheme" in
-                    iptables) scheme_name="传统 iptables TProxy" ;;
-                    ebpf-v2) scheme_name="高性能 eBPF TC TProxy v2.0" ;;
-                    ebpf-old) scheme_name="旧版 eBPF TC TProxy" ;;
-                esac
-                echo -e "${GREEN}📊 当前方案: ${BLUE}$scheme_name${NC} ${status_info}"
-            else
-                echo -e "${YELLOW}ℹ️  当前未检测到已安装的 TProxy 方案${NC}"
-            fi
-            echo ""
-            
-            # 检查内核模块
-            echo -e "${CYAN}1. 内核模块检查:${NC}"
-            if lsmod | grep -q "xt_TPROXY"; then
-                echo -e "   ${GREEN}✅ xt_TPROXY 模块已加载${NC}"
-            else
-                echo -e "   ${RED}❌ xt_TPROXY 模块未加载${NC}"
-                echo -e "   ${YELLOW}   尝试加载: modprobe xt_TPROXY${NC}"
-                modprobe xt_TPROXY 2>/dev/null && echo -e "   ${GREEN}✅ 模块加载成功${NC}" || echo -e "   ${RED}❌ 模块加载失败${NC}"
-            fi
-            
-            # 检查 iptables 规则
-            echo ""
-            echo -e "${CYAN}2. iptables 规则检查:${NC}"
-            if iptables -t mangle -L TPROXY_CHAIN >/dev/null 2>&1; then
-                echo -e "   ${GREEN}✅ TPROXY_CHAIN 链存在${NC}"
-                if iptables -t mangle -L PREROUTING -n | grep -q "TPROXY_CHAIN"; then
-                    echo -e "   ${GREEN}✅ PREROUTING 跳转规则已配置${NC}"
-                else
-                    echo -e "   ${RED}❌ PREROUTING 跳转规则未找到！${NC}"
-                fi
-                echo -e "   ${YELLOW}   规则数量: $(iptables -t mangle -L TPROXY_CHAIN | grep -c '^[A-Z]' || echo 0)${NC}"
-            else
-                echo -e "   ${YELLOW}⚠️  TPROXY_CHAIN 链不存在（可能使用 eBPF 方案）${NC}"
-            fi
-            
-            # 检查 TC eBPF
-            echo ""
-            echo -e "${CYAN}3. TC eBPF 检查:${NC}"
-            local MAIN_IF=$(ip -4 route show default 2>/dev/null | grep -o 'dev [^ ]*' | awk '{print $2}' | head -n1)
-            [ -z "$MAIN_IF" ] && MAIN_IF=$(ip -4 link show 2>/dev/null | grep -E '^[0-9]+:' | grep -v 'lo:' | head -n1 | awk -F': ' '{print $2}' | awk '{print $1}')
-            if [ -n "$MAIN_IF" ]; then
-                if tc qdisc show dev "$MAIN_IF" 2>/dev/null | grep -q "clsact"; then
-                    echo -e "   ${GREEN}✅ clsact qdisc 已创建 (接口: $MAIN_IF)${NC}"
-                    if tc filter show dev "$MAIN_IF" ingress 2>/dev/null | grep -q "bpf"; then
-                        echo -e "   ${GREEN}✅ eBPF 程序已加载${NC}"
-                    else
-                        echo -e "   ${YELLOW}⚠️  eBPF 程序未加载（可能使用 iptables 方案）${NC}"
-                    fi
-                else
-                    echo -e "   ${YELLOW}⚠️  clsact qdisc 不存在（可能使用 iptables 方案）${NC}"
-                fi
-            else
-                echo -e "   ${RED}❌ 无法检测主网络接口${NC}"
-            fi
-            
-            # 检查策略路由
-            echo ""
-            echo -e "${CYAN}4. 策略路由检查:${NC}"
-            # 检测 mihomo 配置中的 routing-mark
-            local mihomo_config="/etc/mihomo/config.yaml"
-            local expected_mark="0x2333"
-            if [ -f "$mihomo_config" ]; then
-                local mihomo_mark=$(grep -E "^routing-mark:" "$mihomo_config" 2>/dev/null | awk '{print $2}' | tr -d ' ' | head -n1)
-                if [ -n "$mihomo_mark" ] && [[ "$mihomo_mark" =~ ^[0-9]+$ ]]; then
-                    expected_mark=$(printf "0x%X" "$mihomo_mark" 2>/dev/null || echo "0x2333")
-                fi
-            fi
-            
-            if ip rule show | grep -q "fwmark $expected_mark"; then
-                echo -e "   ${GREEN}✅ fwmark $expected_mark 规则已配置${NC}"
-            else
-                echo -e "   ${RED}❌ fwmark $expected_mark 规则未找到！${NC}"
-                # 显示当前配置的 mark（正确解析 ip rule show 输出）
-                # ip rule show 输出格式: "32765:  from all fwmark 0x23b3 lookup 100"
-                local current_mark=$(ip rule show | grep "fwmark" | head -1 | grep -oE "fwmark 0x[0-9a-fA-F]+" | awk '{print $2}')
-                if [ -n "$current_mark" ]; then
-                    echo -e "   ${YELLOW}   当前配置的 mark: $current_mark${NC}"
-                    # 转换为大写进行比较
-                    local current_mark_upper=$(echo "$current_mark" | tr '[:lower:]' '[:upper:]')
-                    local expected_mark_upper=$(echo "$expected_mark" | tr '[:lower:]' '[:upper:]')
-                    if [ "$current_mark_upper" != "$expected_mark_upper" ]; then
-                        echo -e "   ${RED}   ⚠️  mark 值不匹配！这会导致流量无法正确路由${NC}"
-                        echo -e "   ${YELLOW}   需要: $expected_mark, 当前: $current_mark${NC}"
-                    fi
-                else
-                    echo -e "   ${YELLOW}   未找到任何 fwmark 规则${NC}"
-                fi
-            fi
-            if ip route show table 100 2>/dev/null | grep -q "local default"; then
-                echo -e "   ${GREEN}✅ 路由表 100 已配置${NC}"
-            else
-                echo -e "   ${RED}❌ 路由表 100 未正确配置！${NC}"
-            fi
-            
-            # 检查服务状态
-            echo ""
-            echo -e "${CYAN}5. 服务状态检查:${NC}"
-            if [ "$OS_DIST" == "alpine" ]; then
-                if rc-service tproxy status >/dev/null 2>&1; then
-                    echo -e "   ${GREEN}✅ iptables tproxy 服务: 运行中${NC}"
-                elif [ -f /etc/init.d/tproxy ]; then
-                    echo -e "   ${YELLOW}⚠️  iptables tproxy 服务: 已安装但未运行${NC}"
-                fi
-                if rc-service ebpf-tproxy status >/dev/null 2>&1; then
-                    echo -e "   ${GREEN}✅ eBPF ebpf-tproxy 服务: 运行中${NC}"
-                elif [ -f /etc/init.d/ebpf-tproxy ]; then
-                    echo -e "   ${YELLOW}⚠️  eBPF ebpf-tproxy 服务: 已安装但未运行${NC}"
-                fi
-            else
-                if systemctl is-active --quiet tproxy.service 2>/dev/null; then
-                    echo -e "   ${GREEN}✅ iptables tproxy.service: 运行中${NC}"
-                elif systemctl is-enabled --quiet tproxy.service 2>/dev/null; then
-                    echo -e "   ${YELLOW}⚠️  iptables tproxy.service: 已启用但未运行${NC}"
-                fi
-                if systemctl is-active --quiet ebpf-tproxy.service 2>/dev/null; then
-                    echo -e "   ${GREEN}✅ eBPF ebpf-tproxy.service: 运行中${NC}"
-                elif systemctl is-enabled --quiet ebpf-tproxy.service 2>/dev/null; then
-                    echo -e "   ${YELLOW}⚠️  eBPF ebpf-tproxy.service: 已启用但未运行${NC}"
-                fi
-            fi
-            
-            # 检查 IP 转发
-            echo ""
-            echo -e "${CYAN}6. 系统配置检查:${NC}"
-            if [ "$(sysctl -n net.ipv4.ip_forward 2>/dev/null)" = "1" ]; then
-                echo -e "   ${GREEN}✅ IPv4 转发已启用${NC}"
-            else
-                echo -e "   ${RED}❌ IPv4 转发未启用！${NC}"
-                echo -e "   ${YELLOW}   修复: sysctl -w net.ipv4.ip_forward=1${NC}"
-            fi
-            
-            # 检查日志
-            echo ""
-            echo -e "${CYAN}7. 日志文件:${NC}"
-            if [ -f /var/log/ebpf-tproxy.log ]; then
-                tail -5 /var/log/ebpf-tproxy.log 2>/dev/null | sed 's/^/      /'
-            fi
-            
-            echo ""
-            
-            # 检查 mihomo 配置中的 routing-mark
-            echo ""
-            echo -e "${CYAN}8. Mihomo 配置检查:${NC}"
-            local mihomo_config="/etc/mihomo/config.yaml"
-            if [ -f "$mihomo_config" ]; then
-                local mihomo_mark=$(grep -E "^routing-mark:" "$mihomo_config" 2>/dev/null | awk '{print $2}' | tr -d ' ')
-                if [ -n "$mihomo_mark" ]; then
-                    echo -e "   ${GREEN}✅ 检测到 mihomo routing-mark: $mihomo_mark${NC}"
-                    # 转换为十六进制
-                    local mihomo_mark_hex=$(printf "0x%X" "$mihomo_mark" 2>/dev/null || echo "")
-                    echo -e "   ${YELLOW}   十六进制: $mihomo_mark_hex${NC}"
-                    
-                    # 检查 TProxy mark 是否匹配
-                    if ip rule show | grep -q "fwmark $mihomo_mark_hex"; then
-                        echo -e "   ${GREEN}✅ TProxy mark 与 mihomo routing-mark 匹配${NC}"
-                    else
-                        echo -e "   ${RED}❌ 警告：TProxy mark 与 mihomo routing-mark 不匹配！${NC}"
-                        local current_mark=$(ip rule show | grep "fwmark" | head -1 | awk '{print $NF}' | cut -d' ' -f1)
-                        echo -e "   ${YELLOW}   当前 TProxy mark: ${current_mark:-"未配置"}${NC}"
-                        echo -e "   ${YELLOW}   mihomo routing-mark: $mihomo_mark ($mihomo_mark_hex)${NC}"
-                        echo -e "   ${RED}   这会导致流量无法正确路由！${NC}"
-                    fi
-                else
-                    echo -e "   ${YELLOW}⚠️  未在 mihomo 配置中找到 routing-mark${NC}"
-                fi
-            else
-                echo -e "   ${YELLOW}⚠️  mihomo 配置文件不存在: $mihomo_config${NC}"
-            fi
-            
-            # 检查是否有问题需要修复
-            local has_issues=false
-            # 检查策略路由（支持多种 mark 值）
-            if ! ip rule show | grep -qE "fwmark (0x2333|0x23B3|9139|9011)" || ! ip route show table 100 2>/dev/null | grep -q "local default"; then
-                has_issues=true
-            fi
-            
-            if [ "$has_issues" = true ]; then
-                echo -e "${YELLOW}⚠️  检测到配置问题！${NC}"
-                read -p "是否尝试自动修复？(y/N): " fix_confirm
-                if [[ "$fix_confirm" =~ ^[Yy]$ ]]; then
-                    echo ""
-                    echo -e "${YELLOW}🔧 正在尝试修复...${NC}"
-                    
-                    # 检测主网卡
-                    local MAIN_IF=$(ip -4 route show default 2>/dev/null | grep -o 'dev [^ ]*' | awk '{print $2}' | head -n1)
-                    [ -z "$MAIN_IF" ] && MAIN_IF=$(ip -4 link show 2>/dev/null | grep -E '^[0-9]+:' | grep -v 'lo:' | head -n1 | awk -F': ' '{print $2}' | awk '{print $1}')
-                    
-                    # 加载内核模块
-                    modprobe xt_TPROXY 2>/dev/null || true
-                    modprobe nf_tproxy_ipv4 2>/dev/null || true
-                    
-                    # 检测正确的 mark 值（优先使用 mihomo 配置）
-                    local fix_mark="0x2333"
-                    if [ -f "/etc/mihomo/config.yaml" ]; then
-                        local mihomo_mark=$(grep -E "^routing-mark:" /etc/mihomo/config.yaml 2>/dev/null | awk '{print $2}' | tr -d ' ' | head -n1)
-                        if [ -n "$mihomo_mark" ] && [[ "$mihomo_mark" =~ ^[0-9]+$ ]]; then
-                            fix_mark=$(printf "0x%X" "$mihomo_mark" 2>/dev/null || echo "0x2333")
-                            echo -e "${GREEN}   使用 mihomo 配置的 routing-mark: $mihomo_mark ($fix_mark)${NC}"
-                        fi
-                    fi
-                    
-                    # 清理所有旧的策略路由规则（包括可能的错误 mark）
-                    echo -e "${YELLOW}  - 清理旧的策略路由规则...${NC}"
-                    ip rule show | grep "fwmark" | while read rule; do
-                        local old_mark=$(echo "$rule" | grep -oE "fwmark 0x[0-9a-fA-F]+" | awk '{print $2}')
-                        if [ -n "$old_mark" ]; then
-                            ip rule del fwmark "$old_mark" table 100 2>/dev/null || true
-                        fi
-                    done
-                    ip route flush table 100 2>/dev/null || true
-                    
-                    # 修复策略路由
-                    echo -e "${YELLOW}  - 修复策略路由 (使用 mark: $fix_mark)...${NC}"
-                    if ip rule add fwmark "$fix_mark" table 100 2>/dev/null; then
-                        echo -e "${GREEN}    ✅ 策略路由规则已添加${NC}"
-                    else
-                        echo -e "${RED}    ❌ 策略路由规则添加失败${NC}"
-                    fi
-                    
-                    if ip route add local default dev lo table 100 2>/dev/null; then
-                        echo -e "${GREEN}    ✅ 路由表 100 已配置${NC}"
-                    else
-                        echo -e "${RED}    ❌ 路由表 100 配置失败${NC}"
-                    fi
-                    
-                    # 验证修复结果
-                    echo -e "${YELLOW}  - 验证修复结果...${NC}"
-                    if ip rule show | grep -q "fwmark $fix_mark"; then
-                        echo -e "${GREEN}    ✅ 策略路由规则验证成功${NC}"
-                    else
-                        echo -e "${RED}    ❌ 策略路由规则验证失败！${NC}"
-                        echo -e "${YELLOW}   当前规则: $(ip rule show | grep fwmark || echo '无')${NC}"
-                    fi
-                    
-                    # 如果使用 eBPF 方案，重新启动服务
-                    if [ "$current_scheme" = "ebpf-v2" ]; then
-                        echo -e "${YELLOW}  - 重新启动 eBPF TProxy 服务...${NC}"
-                        if [ "$OS_DIST" == "alpine" ]; then
-                            rc-service ebpf-tproxy restart 2>/dev/null || rc-service ebpf-tproxy start 2>/dev/null || true
-                        else
-                            systemctl restart ebpf-tproxy.service 2>/dev/null || systemctl start ebpf-tproxy.service 2>/dev/null || true
-                        fi
-                        sleep 2
-                    elif [ "$current_scheme" = "iptables" ]; then
-                        echo -e "${YELLOW}  - 重新启动 iptables TProxy 服务...${NC}"
-                        if [ "$OS_DIST" == "alpine" ]; then
-                            rc-service tproxy restart 2>/dev/null || rc-service tproxy start 2>/dev/null || true
-                        else
-                            systemctl restart tproxy.service 2>/dev/null || systemctl start tproxy.service 2>/dev/null || true
-                        fi
-                        sleep 2
-                    fi
-                    
-                    echo ""
-                    echo -e "${GREEN}✅ 修复完成！请重新运行诊断检查结果${NC}"
-                else
-                    echo -e "${YELLOW}💡 如果发现问题，可以尝试重新安装 TProxy 方案${NC}"
-                fi
-            else
-                echo -e "${GREEN}✅ 配置看起来正常${NC}"
-            fi
-            
-            # 如果服务未运行，提示启动
-            if [ "$current_scheme" != "none" ]; then
-                local service_running=false
-                if [ "$current_scheme" = "ebpf-v2" ]; then
-                    if [ "$OS_DIST" == "alpine" ]; then
-                        rc-service ebpf-tproxy status >/dev/null 2>&1 && service_running=true
-                    else
-                        systemctl is-active --quiet ebpf-tproxy.service 2>/dev/null && service_running=true
-                    fi
-                elif [ "$current_scheme" = "iptables" ]; then
-                    if [ "$OS_DIST" == "alpine" ]; then
-                        rc-service tproxy status >/dev/null 2>&1 && service_running=true
-                    else
-                        systemctl is-active --quiet tproxy.service 2>/dev/null && service_running=true
-                    fi
-                fi
-                
-                if [ "$service_running" = false ]; then
-                    echo ""
-                    echo -e "${YELLOW}⚠️  检测到服务未运行${NC}"
-                    read -p "是否启动服务以应用配置？(Y/n): " start_service
-                    if [[ ! "$start_service" =~ ^[Nn]$ ]]; then
-                        if [ "$current_scheme" = "ebpf-v2" ]; then
-                            if [ "$OS_DIST" == "alpine" ]; then
-                                rc-service ebpf-tproxy start
-                            else
-                                systemctl start ebpf-tproxy.service
-                            fi
-                        elif [ "$current_scheme" = "iptables" ]; then
-                            if [ "$OS_DIST" == "alpine" ]; then
-                                rc-service tproxy start
-                            else
-                                systemctl start tproxy.service
-                            fi
-                        fi
-                        sleep 2
-                        echo -e "${GREEN}✅ 服务已启动${NC}"
-                    fi
-                fi
-            fi
+            diagnose_tproxy
             ;;
         5)
             echo -e "${RED}⚠️  正在执行完全清理...${NC}"
