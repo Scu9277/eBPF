@@ -1097,13 +1097,15 @@ cleanup_old_tproxy() {
         cleaned=true
     fi
     
-    # 4. 清理策略路由
-    if ip rule show | grep -q "fwmark $TPROXY_MARK"; then
-        echo -e "${YELLOW}  - 清理策略路由规则...${NC}"
-        ip rule del fwmark $TPROXY_MARK table $TABLE_ID 2>/dev/null || true
-        ip route flush table $TABLE_ID 2>/dev/null || true
-        cleaned=true
-    fi
+    # 4. 清理策略路由 (支持多种常见 mark)
+    for m in $TPROXY_MARK 0x23B3 0x23b3 9139; do
+        if ip rule show | grep -qi "fwmark $m"; then
+            echo -e "${YELLOW}  - 清理策略路由规则 (mark $m)...${NC}"
+            ip rule del fwmark $m table $TABLE_ID 2>/dev/null || true
+            ip route flush table $TABLE_ID 2>/dev/null || true
+            cleaned=true
+        fi
+    done
     
     # 5. 停止并禁用旧服务
     # iptables tproxy 服务
@@ -1197,12 +1199,13 @@ install_tproxy() {
             ;;
     esac
     echo "  4) 诊断当前 TProxy 配置状态"
+    echo -e "  5) ${RED}完全清理所有 TProxy 规则${NC}"
     echo
-    read -p "请输入选项 [1-4]: " t_choice
+    read -p "请输入选项 [1-5]: " t_choice
     
     # 如果是诊断选项，直接执行诊断，不进行清理
-    if [ "$t_choice" = "4" ]; then
-        # 诊断逻辑在 case 语句中，这里直接跳转
+    if [ "$t_choice" = "4" ] || [ "$t_choice" = "5" ]; then
+        # 诊断或清理选项，直接执行
         :
     else
         # 检查是否选择了当前使用的方案
@@ -1441,13 +1444,18 @@ install_tproxy() {
                 echo -e "   ${YELLOW}   最后 5 行:${NC}"
                 tail -5 /var/log/ebpf-tproxy.log 2>/dev/null | sed 's/^/      /'
             fi
-            if [ -f /var/log/tproxy.log ]; then
-                echo -e "   ${GREEN}✅ iptables 日志: /var/log/tproxy.log${NC}"
-                echo -e "   ${YELLOW}   最后 5 行:${NC}"
-                tail -5 /var/log/tproxy.log 2>/dev/null | sed 's/^/      /'
-            fi
             
             echo ""
+            ;;
+        5)
+            echo -e "${RED}⚠️  正在执行完全清理...${NC}"
+            if [ -f "./cleanup-tproxy.sh" ]; then
+                bash ./cleanup-tproxy.sh
+            else
+                # 直接执行清理逻辑
+                cleanup_old_tproxy
+            fi
+            ;;
             
             # 检查 mihomo 配置中的 routing-mark
             echo ""

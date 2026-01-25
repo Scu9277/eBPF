@@ -386,16 +386,21 @@ compile_ebpf() {
     if [ -n "$MAIN_INTERFACE" ]; then
         local host_ip=$(ip -4 addr show "$MAIN_INTERFACE" 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d/ -f1 | head -n1)
         if [ -n "$host_ip" ]; then
-            # 将 IP 地址转换为网络字节序十六进制（小端序）
-            local ip_parts=($(echo "$host_ip" | tr '.' ' '))
-            if [ ${#ip_parts[@]} -eq 4 ]; then
-                # 网络字节序是大端序，但在 x86 上需要按小端序存储
-                # 例如 10.0.0.99 -> 0x6300000a (小端序)
-                host_ip_hex=$(printf "0x%02x%02x%02x%02x" ${ip_parts[3]} ${ip_parts[2]} ${ip_parts[1]} ${ip_parts[0]})
-                echo -e "${YELLOW}   宿主机 IP: $host_ip (hex: $host_ip_hex)${NC}"
-            fi
+            # Network byte order (Big Endian) 
+            # 10.0.0.58 -> 0x3a00000a (BE) 
+            host_ip_hex=$(printf "0x%02x%02x%02x%02x" ${ip_parts[0]} ${ip_parts[1]} ${ip_parts[2]} ${ip_parts[3]})
+            echo -e "${YELLOW}   宿主机 IP: $host_ip (hex: $host_ip_hex)${NC}"
         fi
     fi
+    
+    # 动态检测本地网段
+    local lan_subnet=$(ip -4 addr show "$MAIN_INTERFACE" | grep 'inet ' | awk '{print $2}' | head -n1)
+    local lan_ip_raw=$(echo $lan_subnet | cut -d/ -f1)
+    local lan_mask=$(echo $lan_subnet | cut -d/ -f2)
+    
+    # 将网段转换为十六进制掩码 (用于 eBPF)
+    local lan_parts=($(echo "$lan_ip_raw" | tr '.' ' '))
+    local lan_hex=$(printf "0x%02x%02x%02x%02x" ${lan_parts[0]} ${lan_parts[1]} ${lan_parts[2]} ${lan_parts[3]})
     
     cat > "$ebpf_source" <<'EOFBPF'
 #include <linux/bpf.h>
@@ -418,6 +423,18 @@ EOFBPF
     if [ -n "$host_ip_hex" ]; then
         echo "#define HOST_IP $host_ip_hex" >> "$ebpf_source"
     fi
+    if [ -n "$lan_hex" ]; then
+        echo "#define LAN_IP $lan_hex" >> "$ebpf_source"
+        # 简单处理掩码，如果是 /24 则为 0xffffff00 (BE)
+        local mask_hex="0x00000000"
+        case $lan_mask in
+            24) mask_hex="0x00ffffff" ;;
+            16) mask_hex="0x0000ffff" ;;
+            8)  mask_hex="0x000000ff" ;;
+            *)  mask_hex="0x00ffffff" ;; # 默认 /24
+        esac
+        echo "#define LAN_MASK $mask_hex" >> "$ebpf_source"
+    fi
     
     cat >> "$ebpf_source" <<'EOFBPF'
 
@@ -433,33 +450,29 @@ int tproxy_mark(struct __sk_buff *skb) {
     __be32 saddr = ip->saddr;
     __be32 daddr = ip->daddr;
     
-    // ⚠️ 关键修复：只豁免宿主机自己发出的流量（源地址是宿主机 IP）
-    // 不豁免发往宿主机的流量，因为那些是需要转发的客户端流量
+    // ⚠️ 修复：Endianness 匹配。ip->saddr 是 Big Endian
 #ifdef HOST_IP
-    if (saddr == HOST_IP) {
-        // 宿主机自己发出的流量，不代理
+    if (saddr == bpf_htonl(HOST_IP)) {
         return TC_ACT_OK;
     }
 #endif
     
     // 跳过本地回环
-    if ((saddr & 0x000000ff) == 0x0000007f || (daddr & 0x000000ff) == 0x0000007f) // 127.x.x.x
+    if ((bpf_ntohl(saddr) & 0xff000000) == 0x7f000000 || (bpf_ntohl(daddr) & 0xff000000) == 0x7f000000)
         return TC_ACT_OK;
     
-    // 跳过局域网目标地址（避免代理内网流量）
-    // 注意：这里只检查目标地址，不检查源地址
-    // 10.0.0.0/8
-    if ((daddr & 0x000000ff) == 0x0000000a)
+    // ⚠️ 改进：只跳过真正的本地网段，而不是整个 10.0.0.0/8
+#ifdef LAN_IP
+    if ((daddr & LAN_MASK) == (bpf_htonl(LAN_IP) & LAN_MASK)) {
         return TC_ACT_OK;
+    }
+#endif
+
+    // 常用私有网段豁免 (可选，但为了防止 Fake-IP 冲突，建议精确)
     // 192.168.0.0/16
-    if ((daddr & 0x0000ffff) == 0x0000a8c0)
-        return TC_ACT_OK;
-    // 172.16.0.0/12
-    if ((daddr & 0x0000f0ff) == 0x000010ac)
-        return TC_ACT_OK;
+    if ((bpf_ntohl(daddr) & 0xffff0000) == 0xc0a80000) return TC_ACT_OK;
     
-    // 标记数据包（只标记从其他设备发来的、发往外网的流量）
-    // 在 ingress 阶段，这些数据包是从客户端设备发来的，需要转发到 mihomo
+    // 标记数据包
     skb->mark = TPROXY_MARK;
     
     return TC_ACT_OK;
@@ -706,11 +719,13 @@ fi
 
 # 3. 豁免宿主机服务端口（基于目标端口）
 $IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp --dport 22 -j RETURN    # SSH
+$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p udp --dport 53 -j RETURN    # DNS
+$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp --dport 53 -j RETURN    # DNS
 $IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp --dport 80 -j RETURN    # HTTP
 $IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp --dport 443 -j RETURN   # HTTPS
 $IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp --dport 9090 -j RETURN  # Mihomo UI
 $IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp --dport $TPROXY_PORT -j RETURN  # TProxy 端口
-log "✅ 已豁免宿主机服务端口 (22, 80, 443, 9090, $TPROXY_PORT)"
+log "✅ 已豁免宿主机服务端口 (22, 53, 80, 443, 9090, $TPROXY_PORT)"
 
 # 4. 豁免 Docker 端口
 $IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp --dport $DOCKER_PORT -j RETURN
@@ -847,8 +862,8 @@ verify_config() {
         errors=$((errors + 1))
     fi
     
-    # 4. 检查策略路由
-    if ip rule show | grep -q "$TPROXY_MARK"; then
+    # 4. 检查策略路由 (不区分大小写)
+    if ip rule show | grep -qi "$TPROXY_MARK"; then
         echo "✅ 策略路由规则已配置 (mark: $TPROXY_MARK)"
     else
         echo "❌ 策略路由规则未找到"

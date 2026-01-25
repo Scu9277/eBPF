@@ -331,21 +331,30 @@ if [ -n "$MAIN_IP" ]; then
     log "✅ 已豁免宿主机发出的流量 (源: $MAIN_IP)"
 fi
 
-# 3. 豁免宿主机服务端口（基于目标端口）
+# 3. 豁免宿主机服务端口 (22, 53, 80, 443, 9090, 9420)
 iptables -t mangle -A $CHAIN_NAME -p tcp --dport 22 -j RETURN    # SSH
+iptables -t mangle -A $CHAIN_NAME -p udp --dport 53 -j RETURN    # DNS (Local hijacking)
+iptables -t mangle -A $CHAIN_NAME -p tcp --dport 53 -j RETURN    # DNS (Local hijacking)
 iptables -t mangle -A $CHAIN_NAME -p tcp --dport 80 -j RETURN    # HTTP
 iptables -t mangle -A $CHAIN_NAME -p tcp --dport 443 -j RETURN   # HTTPS
 iptables -t mangle -A $CHAIN_NAME -p tcp --dport 9090 -j RETURN  # Mihomo UI
 iptables -t mangle -A $CHAIN_NAME -p tcp --dport $TPROXY_PORT -j RETURN  # TProxy 端口
-log "✅ 已豁免宿主机服务端口 (22, 80, 443, 9090, $TPROXY_PORT)"
+log "✅ 已豁免宿主机服务端口 (22, 53, 80, 443, 9090, $TPROXY_PORT)"
 
 # 4. 豁免 Docker 订阅端口
 iptables -t mangle -A $CHAIN_NAME -p tcp --dport $DOCKER_PORT -j RETURN
 iptables -t mangle -A $CHAIN_NAME -p udp --dport $DOCKER_PORT -j RETURN
 
-# 5. 豁免局域网目标地址（避免代理内网流量）
+# 5. 豁免局域网目标地址 (精确检测)
+LAN_SUBNET=$(ip -4 addr show "$MAIN_IF" 2>/dev/null | grep 'inet ' | awk '{print $2}' | head -n1)
+if [ -n "$LAN_SUBNET" ]; then
+    iptables -t mangle -A $CHAIN_NAME -d $LAN_SUBNET -j RETURN
+    log "✅ 已豁免局域网网段: $LAN_SUBNET"
+fi
+
+# 常用私有网段豁免 (补漏)
 iptables -t mangle -A $CHAIN_NAME -d 192.168.0.0/16 -j RETURN
-iptables -t mangle -A $CHAIN_NAME -d 10.0.0.0/8 -j RETURN
+# iptables -t mangle -A $CHAIN_NAME -d 10.0.0.0/8 -j RETURN  # 过宽，可能冲突
 iptables -t mangle -A $CHAIN_NAME -d 172.16.0.0/12 -j RETURN
 iptables -t mangle -A $CHAIN_NAME -d 255.255.255.255 -j RETURN
 
@@ -439,8 +448,8 @@ verify_config() {
         errors=$((errors + 1))
     fi
     
-    # 4. 检查策略路由
-    if ip rule show | grep -q "$TPROXY_MARK"; then
+    # 4. 检查策略路由 (不区分大小写)
+    if ip rule show | grep -qi "$TPROXY_MARK"; then
         echo "✅ 策略路由规则已配置 (mark: $TPROXY_MARK)"
     else
         echo "❌ 策略路由规则未找到"
