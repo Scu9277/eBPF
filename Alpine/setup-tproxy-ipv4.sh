@@ -330,8 +330,8 @@ iptables -t mangle -A $CHAIN_NAME -s 127.0.0.0/8 -j RETURN
 
 # 2. ⚠️ 关键：豁免宿主机自身流量 (双向)
 if [ -n "$MAIN_IP" ]; then
-    iptables -t mangle -A $CHAIN_NAME -s $MAIN_IP -j RETURN
-    iptables -t mangle -A $CHAIN_NAME -d $MAIN_IP -j RETURN
+    iptables -t mangle -A $CHAIN_NAME -s $MAIN_IP -j RETURN 2>/dev/null || true
+    iptables -t mangle -A $CHAIN_NAME -d $MAIN_IP -j RETURN 2>/dev/null || true
     log "✅ 已豁免宿主机自身流量 (IP: $MAIN_IP)"
 fi
 
