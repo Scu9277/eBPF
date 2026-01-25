@@ -360,16 +360,18 @@ for net in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 127.0.0.0/8 255.255.255.255; 
 done
 
 # 如果有检测到额外网段，补充豁免
-if [ -n "$LAN_SUBNET" ] && [[ "$LAN_SUBNET" != 10.* ]] && [[ "$LAN_SUBNET" != 192.168.* ]] && [[ "$LAN_SUBNET" != 172.* ]]; then
-    iptables -t mangle -A $CHAIN_NAME -d $LAN_SUBNET -j RETURN
+      iptables -t mangle -A $CHAIN_NAME -d $LAN_SUBNET -j RETURN
 fi
 log "✅ 局域网豁免配置完成"
 
-# 6. TProxy 转发规则（最后匹配，作为默认规则）
-iptables -t mangle -A $CHAIN_NAME -p tcp -j TPROXY --on-port $TPROXY_PORT --tproxy-mark $TPROXY_MARK
-iptables -t mangle -A $CHAIN_NAME -p udp -j TPROXY --on-port $TPROXY_PORT --tproxy-mark $TPROXY_MARK
-
-log "✅ iptables TProxy 规则配置完成"
+# 6. TProxy 转发规则 (⚠️ 最终防御：仅处理来自局域网的合法客户端流量)
+# 这防止了来自互联网的随机流量误入 TProxy，解决了连接数爆表的问题。
+log "🔗 正在配置 TProxy 转发逻辑 (仅限局域网来源)..."
+for net in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16; do
+  iptables -t mangle -A $CHAIN_NAME -s $net -p tcp -j TPROXY --on-port $TPROXY_PORT --tproxy-mark $TPROXY_MARK
+  iptables -t mangle -A $CHAIN_NAME -s $net -p udp -j TPROXY --on-port $TPROXY_PORT --tproxy-mark $TPROXY_MARK
+done
+log "✅ TProxy 转发规则配置完成"
 
 # Hook 到 PREROUTING
 iptables -t mangle -I PREROUTING -j $CHAIN_NAME

@@ -464,27 +464,35 @@ int tproxy_mark(struct __sk_buff *skb) {
     __u32 s_val = bpf_ntohl(saddr);
     __u32 d_val = bpf_ntohl(daddr);
     
-    // 2.1 完全放行本地回环 (127.0.0.0/8)
+    // 2.1 放行本地回环
     if ((s_val >> 24) == 127 || (d_val >> 24) == 127)
         return TC_ACT_OK;
 
-    // 2.2 ⚠️ 绝命豁免：只要目标是宿主机 IP (10.0.0.99)，绝对放行
-    // 这样解决了 UI/SSH/节点健康检查的所有回环问题
+    // 2.2 豁免宿主机自身流量 (目标是宿主机，或是宿主机发出的)
 #ifdef HOST_IP
     if (daddr == bpf_htonl(HOST_IP) || saddr == bpf_htonl(HOST_IP)) {
         return TC_ACT_OK;
     }
 #endif
     
-    // 2.3 局域网目标暴力放行 (192.168.x.x, 10.x.x.x, 172.16.x.x)
-    if ((d_val >> 24) == 10) return TC_ACT_OK;
-    if ((d_val >> 16) == 0xc0a8) return TC_ACT_OK;
-    if ((d_val >> 20) == 0xac1) return TC_ACT_OK;
+    // 2.3 局域网目标放行 (直连)
+    if ((d_val >> 24) == 10 || (d_val >> 16) == 0xc0a8 || (d_val >> 20) == 0xac1)
+        return TC_ACT_OK;
     
     // 2.4 组播/广播放行
     if (d_val >= 0xe0000000) return TC_ACT_OK;
 
-    // 3. 标记剩余流量 (进入代理流程)
+    // 3. ⚠️ 终极防御：只打标来自局域网的包 !!
+    // 这防止了来自互联网的流量误入 TProxy，解决了连接数瞬间爆表的问题。
+    bool src_is_lan = false;
+    if ((s_val >> 24) == 10 || (s_val >> 16) == 0xc0a8 || (s_val >> 20) == 0xac1) {
+        src_is_lan = true;
+    }
+    
+    // 如果源 IP 不是私网地址，放行！不参与转发。
+    if (!src_is_lan) return TC_ACT_OK;
+
+    // 4. 标记合法客户端流量 (进入代理流程)
     skb->mark = TPROXY_MARK;
     
     return TC_ACT_OK;
