@@ -337,29 +337,33 @@ fi
 
 # 3. 豁免宿主机服务端口 (22, 123, 80, 443, 9090, 9420)
 iptables -t mangle -A $CHAIN_NAME -p tcp --dport 22 -j RETURN    # SSH
-iptables -t mangle -A $CHAIN_NAME -p udp --dport 123 -j RETURN   # NTP (防止海量回环)
+iptables -t mangle -A $CHAIN_NAME -p udp --dport 123 -j RETURN   # NTP
 iptables -t mangle -A $CHAIN_NAME -p tcp --dport 80 -j RETURN    # HTTP
-iptables -t mangle -A $CHAIN_NAME -p tcp --dport 443 -j RETURN   # HTTPS
+# iptables -t mangle -A $CHAIN_NAME -p tcp --dport 443 -j RETURN  # ⚠️ 不要豁免 443，那是主要加密流量
 iptables -t mangle -A $CHAIN_NAME -p tcp --dport 9090 -j RETURN  # Mihomo UI
 iptables -t mangle -A $CHAIN_NAME -p tcp --dport $TPROXY_PORT -j RETURN  # TProxy 端口
-log "✅ 已豁免宿主机服务端口 (22, 123, 80, 443, 9090, $TPROXY_PORT)"
+log "✅ 已豁免宿主机服务端口 (22, 123, 80, 9090, $TPROXY_PORT)"
+
+# !! 关键修复：拦截 QUIC (UDP 443) !!
+# 这会迫使浏览器回退到 TCP，从而能被稳定的代理。你的原始脚本里有这一条，这是成功的关键！
+iptables -t mangle -A $CHAIN_NAME -p udp --dport 443 -j REJECT
+log "✅ 已强行拦截 QUIC (UDP 443) 流量以启用 TCP 回退"
 
 # 4. 豁免 Docker 订阅端口
 iptables -t mangle -A $CHAIN_NAME -p tcp --dport $DOCKER_PORT -j RETURN
 iptables -t mangle -A $CHAIN_NAME -p udp --dport $DOCKER_PORT -j RETURN
 
-# 5. 豁免局域网目标地址 (精确检测)
-LAN_SUBNET=$(ip -4 addr show "$MAIN_IF" 2>/dev/null | grep 'inet ' | awk '{print $2}' | head -n1)
-if [ -n "$LAN_SUBNET" ]; then
-    iptables -t mangle -A $CHAIN_NAME -d $LAN_SUBNET -j RETURN
-    log "✅ 已豁免局域网网段: $LAN_SUBNET"
-fi
+# 5. 豁免局域网、内网地址块 (恢复原始版本最稳逻辑)
+log "🔗 正在配置局域网豁免规则..."
+for net in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 127.0.0.0/8 255.255.255.255; do
+  iptables -t mangle -A $CHAIN_NAME -d $net -j RETURN
+done
 
-# 常用私有网段豁免 (补漏)
-iptables -t mangle -A $CHAIN_NAME -d 192.168.0.0/16 -j RETURN
-# iptables -t mangle -A $CHAIN_NAME -d 10.0.0.0/8 -j RETURN  # 过宽，可能冲突
-iptables -t mangle -A $CHAIN_NAME -d 172.16.0.0/12 -j RETURN
-iptables -t mangle -A $CHAIN_NAME -d 255.255.255.255 -j RETURN
+# 如果有检测到额外网段，补充豁免
+if [ -n "$LAN_SUBNET" ] && [[ "$LAN_SUBNET" != 10.* ]] && [[ "$LAN_SUBNET" != 192.168.* ]] && [[ "$LAN_SUBNET" != 172.* ]]; then
+    iptables -t mangle -A $CHAIN_NAME -d $LAN_SUBNET -j RETURN
+fi
+log "✅ 局域网豁免配置完成"
 
 # 6. TProxy 转发规则（最后匹配，作为默认规则）
 iptables -t mangle -A $CHAIN_NAME -p tcp -j TPROXY --on-port $TPROXY_PORT --tproxy-mark $TPROXY_MARK
