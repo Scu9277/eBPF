@@ -407,8 +407,10 @@ compile_ebpf() {
 #include <linux/pkt_cls.h>
 #include <linux/in.h>
 #include <linux/ip.h>
+#include <linux/ipv6.h>
 #include <linux/tcp.h>
 #include <linux/udp.h>
+#include <linux/if_ether.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
 
@@ -443,60 +445,71 @@ int tproxy_mark(struct __sk_buff *skb) {
     void *data = (void *)(long)skb->data;
     void *data_end = (void *)(long)skb->data_end;
     
-    struct iphdr *ip = data;
-    if (data + sizeof(*ip) > data_end)
-        return TC_ACT_OK;
-    
-    __be32 saddr = ip->saddr;
-    __be32 daddr = ip->daddr;
-    
-    // 1. 豁免本地回环
-    if ((bpf_ntohl(saddr) & 0xff000000) == 0x7f000000 || (bpf_ntohl(daddr) & 0xff000000) == 0x7f000000)
+    // 1. 跳过以太网首部 (14字节)
+    struct ethhdr *eth = data;
+    if (data + sizeof(*eth) > data_end)
         return TC_ACT_OK;
 
-    // 2. 豁免宿主机自己发出的流量 (BE 匹配)
+    // 只处理 IPv4，直接放行 IPv6 和其他协议 (确保 node 节点连接正常)
+    if (eth->h_proto != bpf_htons(ETH_P_IP))
+        return TC_ACT_OK;
+
+    struct iphdr *ip = data + sizeof(*eth);
+    if ((void *)ip + sizeof(*ip) > data_end)
+        return TC_ACT_OK;
+    
+    // 2. 核心豁免逻辑
+    __be32 saddr = ip->saddr;
+    __be32 daddr = ip->daddr;
+    __u32 s_val = bpf_ntohl(saddr);
+    __u32 d_val = bpf_ntohl(daddr);
+    
+    // 2.1 完全放行本地回环 (127.0.0.0/8)
+    if ((s_val >> 24) == 127 || (d_val >> 24) == 127)
+        return TC_ACT_OK;
+
+    // 2.2 终极放行：只要目标是宿主机 IP，无论什么端口都放行
 #ifdef HOST_IP
-    if (saddr == bpf_htonl(HOST_IP)) {
+    if (daddr == bpf_htonl(HOST_IP) || saddr == bpf_htonl(HOST_IP)) {
         return TC_ACT_OK;
     }
 #endif
     
-    // 3. 拦截 QUIC (UDP 443) - 不打标，因为我们要让 iptables REJECT 它
-    // 或者就在这里 RETURN，让后面的 iptables 规则处理
+    // 2.3 局域网目标暴力放行 (192.168.x.x, 10.x.x.x, 172.16.x.x)
+    if ((d_val >> 24) == 10) return TC_ACT_OK;
+    if ((d_val >> 16) == 0xc0a8) return TC_ACT_OK;
+    if ((d_val >> 20) == 0xac1) return TC_ACT_OK;
     
-    // 4. 关键：豁免常见服务端口 (防止标记泄漏导致回环)
-    // 解析端口需要检查协议和长度
+    // 2.4 组播/广播放行 (224.0.0.0/4及以上)
+    if (d_val >= 0xe0000000) return TC_ACT_OK;
+
+    // 3. 端口探测 (针对特定端口进行额外保障)
+    __u16 sport = 0;
     __u16 dport = 0;
+    void *l4_hdr = (void *)ip + (ip->ihl * 4);
+
     if (ip->protocol == IPPROTO_TCP) {
-        struct tcphdr *tcp = data + sizeof(*ip);
-        if (data + sizeof(*ip) + sizeof(*tcp) <= data_end) {
+        struct tcphdr *tcp = l4_hdr;
+        if ((void *)tcp + sizeof(*tcp) <= data_end) {
+            sport = bpf_ntohs(tcp->source);
             dport = bpf_ntohs(tcp->dest);
         }
     } else if (ip->protocol == IPPROTO_UDP) {
-        struct udphdr *udp = data + sizeof(*ip);
-        if (data + sizeof(*ip) + sizeof(*udp) <= data_end) {
+        struct udphdr *udp = l4_hdr;
+        if ((void *)udp + sizeof(*udp) <= data_end) {
+            sport = bpf_ntohs(udp->source);
             dport = bpf_ntohs(udp->dest);
         }
     }
 
-    // SSH(22), NTP(123), HTTP(80), MihomoUI(9090), TProxy(9420)
-    if (dport == 22 || dport == 123 || dport == 80 || dport == 9090 || dport == 9420) {
+    // 放行常见直连端口：SSH(22), NTP(123), DNS(53), HTTP(80), MihomoUI(9090), TProxy(9420)
+    if (sport == 22 || dport == 22 || sport == 123 || dport == 123 || 
+        sport == 9090 || dport == 9090 || sport == 9420 || dport == 9420 ||
+        sport == 53 || dport == 53 || sport == 80 || dport == 80) {
         return TC_ACT_OK;
     }
-    
-    // 5. 广义局域网豁免 (192.168.x.x, 10.x.x.x, 172.16.x.x 等)
-    // 这一步决定了“直连”还是“代理”
-    
-    // 192.168.0.0/16
-    if ((bpf_ntohl(daddr) & 0xffff0000) == 0xc0a80000) return TC_ACT_OK;
-    // 10.0.0.0/8
-    if ((bpf_ntohl(daddr) & 0xff000000) == 0x0a000000) return TC_ACT_OK;
-    // 172.16.0.0/12
-    if ((bpf_ntohl(daddr) & 0xfff00000) == 0xac100000) return TC_ACT_OK;
-    // 默认组播/广播
-    if (bpf_ntohl(daddr) >= 0xe0000000) return TC_ACT_OK;
-    
-    // 标记数据包 (进入代理流程)
+
+    // 4. 标记剩余流量 (进入代理流程)
     skb->mark = TPROXY_MARK;
     
     return TC_ACT_OK;
@@ -741,16 +754,9 @@ if [ -n "$MAIN_IP" ]; then
     log "✅ 已豁免宿主机发出的流量 (源: $MAIN_IP)"
 fi
 
-# 3. 豁免宿主机核心服务端口 (仅保留最基础保障)
-$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp --dport 22 -j RETURN    # SSH
-$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp --dport $TPROXY_PORT -j RETURN  # TProxy 端口
-# 注意：9090(UI), 123(NTP), 80(HTTP) 已经在 eBPF C 代码层精准豁免，彻底杜绝标记泄露导致的回环
-log "✅ 已配置 iptables 基础端口豁免"
-
-# !! 关键修复：拦截 QUIC (UDP 443) !!
-# 这会迫使浏览器回退到 TCP，从而能被稳定的代理。
+# 3. 拦截 QUIC (UDP 443) 流量，强制回退 TCP 以保证代理稳定性
 $IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p udp --dport 443 -j REJECT
-log "✅ 已强行拦截 QUIC (UDP 443) 流量以启用 TCP 回退"
+log "✅ 已拦截 QUIC (UDP 443) 流量"
 
 # 4. 豁免 Docker 端口
 $IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp --dport $DOCKER_PORT -j RETURN
