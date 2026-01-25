@@ -704,10 +704,6 @@ $IPTABLES_CMD -t mangle -X TPROXY_CHAIN 2>/dev/null || true
 # ---- 创建新链 ----
 $IPTABLES_CMD -t mangle -N TPROXY_CHAIN 2>/dev/null || true
 
-# !! 关键修复：防止回环 (如果包已经带了标记，直接跳过)
-$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -m mark --mark $TPROXY_MARK -j RETURN
-log "✅ 已开启防回环保护 (Mark: $TPROXY_MARK)"
-
 # ⚠️ 关键修复：优化规则顺序，正确处理网关模式
 # 规则优先级：本地回环 > 宿主机自身流量 > 服务端口 > 局域网 > TProxy
 
