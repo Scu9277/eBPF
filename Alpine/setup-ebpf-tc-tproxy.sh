@@ -700,8 +700,12 @@ $IPTABLES_CMD -t mangle -D PREROUTING -j TPROXY_CHAIN 2>/dev/null || true
 $IPTABLES_CMD -t mangle -F TPROXY_CHAIN 2>/dev/null || true
 $IPTABLES_CMD -t mangle -X TPROXY_CHAIN 2>/dev/null || true
 
-# 创建新链
+# ---- 创建新链 ----
 $IPTABLES_CMD -t mangle -N TPROXY_CHAIN 2>/dev/null || true
+
+# !! 关键修复：防止回环 (如果包已经带了标记，直接跳过)
+$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -m mark --mark $TPROXY_MARK -j RETURN
+log "✅ 已开启防回环保护 (Mark: $TPROXY_MARK)"
 
 # ⚠️ 关键修复：优化规则顺序，正确处理网关模式
 # 规则优先级：本地回环 > 宿主机自身流量 > 服务端口 > 局域网 > TProxy
@@ -717,15 +721,16 @@ if [ -n "$MAIN_IP" ]; then
     log "✅ 已豁免宿主机发出的流量 (源: $MAIN_IP)"
 fi
 
-# 3. 豁免宿主机服务端口（基于目标端口）
+# 3. 豁免宿主机服务端口 (22, 53, 123, 80, 443, 9090, 9420)
 $IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp --dport 22 -j RETURN    # SSH
 $IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p udp --dport 53 -j RETURN    # DNS
 $IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp --dport 53 -j RETURN    # DNS
+$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p udp --dport 123 -j RETURN   # NTP (防止回环)
 $IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp --dport 80 -j RETURN    # HTTP
 $IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp --dport 443 -j RETURN   # HTTPS
 $IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp --dport 9090 -j RETURN  # Mihomo UI
 $IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp --dport $TPROXY_PORT -j RETURN  # TProxy 端口
-log "✅ 已豁免宿主机服务端口 (22, 53, 80, 443, 9090, $TPROXY_PORT)"
+log "✅ 已豁免宿主机服务端口 (22, 53, 123, 80, 443, 9090, $TPROXY_PORT)"
 
 # 4. 豁免 Docker 端口
 $IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp --dport $DOCKER_PORT -j RETURN
