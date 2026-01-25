@@ -418,10 +418,6 @@ compile_ebpf() {
 #define TC_ACT_OK 0
 #endif
 
-#ifndef TC_ACT_OK
-#define TC_ACT_OK 0
-#endif
-
 EOFBPF
 
     # 添加动态定义
@@ -743,7 +739,8 @@ if [ -n "$MAIN_IP" ]; then
 fi
 
 # 3. 拦截 QUIC (UDP 443) 流量，强制回退 TCP 以保证代理稳定性
-$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p udp --dport 443 -j REJECT
+# 注意：在 mangle 表中必须使用 DROP 否则 Alpine 会报 Invalid argument
+$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p udp --dport 443 -j DROP
 log "✅ 已拦截 QUIC (UDP 443) 流量"
 
 # 4. 豁免 Docker 端口
