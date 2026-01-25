@@ -468,7 +468,8 @@ int tproxy_mark(struct __sk_buff *skb) {
     if ((s_val >> 24) == 127 || (d_val >> 24) == 127)
         return TC_ACT_OK;
 
-    // 2.2 终极放行：只要目标是宿主机 IP，无论什么端口都放行
+    // 2.2 ⚠️ 绝命豁免：只要目标是宿主机 IP (10.0.0.99)，绝对放行
+    // 这样解决了 UI/SSH/节点健康检查的所有回环问题
 #ifdef HOST_IP
     if (daddr == bpf_htonl(HOST_IP) || saddr == bpf_htonl(HOST_IP)) {
         return TC_ACT_OK;
@@ -480,36 +481,10 @@ int tproxy_mark(struct __sk_buff *skb) {
     if ((d_val >> 16) == 0xc0a8) return TC_ACT_OK;
     if ((d_val >> 20) == 0xac1) return TC_ACT_OK;
     
-    // 2.4 组播/广播放行 (224.0.0.0/4及以上)
+    // 2.4 组播/广播放行
     if (d_val >= 0xe0000000) return TC_ACT_OK;
 
-    // 3. 端口探测 (针对特定端口进行额外保障)
-    __u16 sport = 0;
-    __u16 dport = 0;
-    void *l4_hdr = (void *)ip + (ip->ihl * 4);
-
-    if (ip->protocol == IPPROTO_TCP) {
-        struct tcphdr *tcp = l4_hdr;
-        if ((void *)tcp + sizeof(*tcp) <= data_end) {
-            sport = bpf_ntohs(tcp->source);
-            dport = bpf_ntohs(tcp->dest);
-        }
-    } else if (ip->protocol == IPPROTO_UDP) {
-        struct udphdr *udp = l4_hdr;
-        if ((void *)udp + sizeof(*udp) <= data_end) {
-            sport = bpf_ntohs(udp->source);
-            dport = bpf_ntohs(udp->dest);
-        }
-    }
-
-    // 放行常见直连端口：SSH(22), NTP(123), DNS(53), HTTP(80), MihomoUI(9090), TProxy(9420)
-    if (sport == 22 || dport == 22 || sport == 123 || dport == 123 || 
-        sport == 9090 || dport == 9090 || sport == 9420 || dport == 9420 ||
-        sport == 53 || dport == 53 || sport == 80 || dport == 80) {
-        return TC_ACT_OK;
-    }
-
-    // 4. 标记剩余流量 (进入代理流程)
+    // 3. 标记剩余流量 (进入代理流程)
     skb->mark = TPROXY_MARK;
     
     return TC_ACT_OK;
@@ -747,11 +722,11 @@ $IPTABLES_CMD -t mangle -N TPROXY_CHAIN 2>/dev/null || true
 $IPTABLES_CMD -t mangle -A TPROXY_CHAIN -d 127.0.0.0/8 -j RETURN
 $IPTABLES_CMD -t mangle -A TPROXY_CHAIN -s 127.0.0.0/8 -j RETURN
 
-# 2. ⚠️ 关键：只豁免宿主机自己发出的流量（源地址是宿主机 IP）
-#    不豁免发往宿主机的流量，因为客户端流量的目标是外网，不是宿主机
+# 2. ⚠️ 关键：豁免宿主机自身流量 (双向)
 if [ -n "$MAIN_IP" ]; then
     $IPTABLES_CMD -t mangle -A TPROXY_CHAIN -s $MAIN_IP -j RETURN
-    log "✅ 已豁免宿主机发出的流量 (源: $MAIN_IP)"
+    $IPTABLES_CMD -t mangle -A TPROXY_CHAIN -d $MAIN_IP -j RETURN
+    log "✅ 已豁免宿主机自身流量 (IP: $MAIN_IP)"
 fi
 
 # 3. 拦截 QUIC (UDP 443) 流量，强制回退 TCP 以保证代理稳定性
