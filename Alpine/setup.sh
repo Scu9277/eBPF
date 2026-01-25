@@ -1440,22 +1440,10 @@ install_tproxy() {
             echo ""
             echo -e "${CYAN}7. 日志文件:${NC}"
             if [ -f /var/log/ebpf-tproxy.log ]; then
-                echo -e "   ${GREEN}✅ eBPF 日志: /var/log/ebpf-tproxy.log${NC}"
-                echo -e "   ${YELLOW}   最后 5 行:${NC}"
                 tail -5 /var/log/ebpf-tproxy.log 2>/dev/null | sed 's/^/      /'
             fi
             
             echo ""
-            ;;
-        5)
-            echo -e "${RED}⚠️  正在执行完全清理...${NC}"
-            if [ -f "./cleanup-tproxy.sh" ]; then
-                bash ./cleanup-tproxy.sh
-            else
-                # 直接执行清理逻辑
-                cleanup_old_tproxy
-            fi
-            ;;
             
             # 检查 mihomo 配置中的 routing-mark
             echo ""
@@ -1618,6 +1606,17 @@ install_tproxy() {
                         echo -e "${GREEN}✅ 服务已启动${NC}"
                     fi
                 fi
+            fi
+            ;;
+        5)
+            echo -e "${RED}⚠️  正在执行完全清理...${NC}"
+            if [ -f "./cleanup-tproxy.sh" ]; then
+                bash ./cleanup-tproxy.sh
+            elif [ -f "/root/cleanup-tproxy.sh" ]; then
+                bash /root/cleanup-tproxy.sh
+            else
+                # 直接执行清理逻辑
+                cleanup_old_tproxy
             fi
             ;;
         *)
