@@ -328,11 +328,11 @@ log "🔗 配置 iptables TProxy 规则..."
 iptables -t mangle -A $CHAIN_NAME -d 127.0.0.0/8 -j RETURN
 iptables -t mangle -A $CHAIN_NAME -s 127.0.0.0/8 -j RETURN
 
-# 2. ⚠️ 关键：只豁免宿主机自己发出的流量（源地址是宿主机 IP）
-#    不豁免发往宿主机的流量，因为客户端流量的目标是外网，不是宿主机
+# 2. ⚠️ 关键：豁免宿主机自身流量 (双向)
 if [ -n "$MAIN_IP" ]; then
     iptables -t mangle -A $CHAIN_NAME -s $MAIN_IP -j RETURN
-    log "✅ 已豁免宿主机发出的流量 (源: $MAIN_IP)"
+    iptables -t mangle -A $CHAIN_NAME -d $MAIN_IP -j RETURN
+    log "✅ 已豁免宿主机自身流量 (IP: $MAIN_IP)"
 fi
 
 # 3. 豁免宿主机服务端口 (22, 123, 80, 443, 9090, 9420)
