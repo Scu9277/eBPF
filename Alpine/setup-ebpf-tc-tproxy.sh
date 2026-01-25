@@ -461,16 +461,17 @@ int tproxy_mark(struct __sk_buff *skb) {
     if ((bpf_ntohl(saddr) & 0xff000000) == 0x7f000000 || (bpf_ntohl(daddr) & 0xff000000) == 0x7f000000)
         return TC_ACT_OK;
     
-    // ⚠️ 改进：只跳过真正的本地网段，而不是整个 10.0.0.0/8
-#ifdef LAN_IP
-    if ((daddr & LAN_MASK) == (bpf_htonl(LAN_IP) & LAN_MASK)) {
-        return TC_ACT_OK;
-    }
-#endif
-
-    // 常用私有网段豁免 (可选，但为了防止 Fake-IP 冲突，建议精确)
-    // 192.168.0.0/16
+    // ⚠️ 关键改进：广义局域网豁免 (192.168.x.x, 10.x.x.x, 172.16.x.x)
+    // 这样最稳，不会出现 Fake-IP 冲突或漏通
+    
+    // 192.168.0.0/16 (0xC0A80000)
     if ((bpf_ntohl(daddr) & 0xffff0000) == 0xc0a80000) return TC_ACT_OK;
+    // 10.0.0.0/8 (0x0A000000)
+    if ((bpf_ntohl(daddr) & 0xff000000) == 0x0a000000) return TC_ACT_OK;
+    // 172.16.0.0/12 (0xAC100000)
+    if ((bpf_ntohl(daddr) & 0xfff00000) == 0xac100000) return TC_ACT_OK;
+    // 127.0.0.0/8
+    if ((bpf_ntohl(daddr) & 0xff000000) == 0x7f000000) return TC_ACT_OK;
     
     // 标记数据包
     skb->mark = TPROXY_MARK;
@@ -723,29 +724,32 @@ fi
 
 # 3. 豁免宿主机服务端口 (22, 123, 80, 443, 9090, 9420)
 $IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp --dport 22 -j RETURN    # SSH
-$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p udp --dport 123 -j RETURN   # NTP (防止回环)
+$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p udp --dport 123 -j RETURN   # NTP
 $IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp --dport 80 -j RETURN    # HTTP
-$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp --dport 443 -j RETURN   # HTTPS
+# $IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp --dport 443 -j RETURN
 $IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp --dport 9090 -j RETURN  # Mihomo UI
 $IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp --dport $TPROXY_PORT -j RETURN  # TProxy 端口
-log "✅ 已豁免宿主机服务端口 (22, 123, 80, 443, 9090, $TPROXY_PORT)"
+log "✅ 已豁免宿主机服务端口 (22, 123, 80, 9090, $TPROXY_PORT)"
+
+# !! 关键修复：拦截 QUIC (UDP 443) !!
+# 这会迫使浏览器回退到 TCP，从而能被稳定的代理。你的原始脚本里有这一条，这是成功的关键！
+$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p udp --dport 443 -j REJECT
+log "✅ 已强行拦截 QUIC (UDP 443) 流量以启用 TCP 回退"
 
 # 4. 豁免 Docker 端口
 $IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp --dport $DOCKER_PORT -j RETURN
 $IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p udp --dport $DOCKER_PORT -j RETURN
 
-# 5. 豁免局域网目标地址 (精确检测)
-LAN_SUBNET=$(ip -4 addr show "$MAIN_IF" 2>/dev/null | grep 'inet ' | awk '{print $2}' | head -n1)
-if [ -n "$LAN_SUBNET" ]; then
-    $IPTABLES_CMD -t mangle -A TPROXY_CHAIN -d $LAN_SUBNET -j RETURN
-    log "✅ 已豁免局域网网段: $LAN_SUBNET"
-fi
+# 5. 豁免局域网、内网地址块 (恢复原始版本最稳逻辑)
+log "🔗 正在配置局域网豁免规则..."
+for net in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 127.0.0.0/8 255.255.255.255; do
+  $IPTABLES_CMD -t mangle -A TPROXY_CHAIN -d $net -j RETURN
+done
 
-# 常用私有网段豁免 (补漏)
-$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -d 192.168.0.0/16 -j RETURN
-# $IPTABLES_CMD -t mangle -A TPROXY_CHAIN -d 10.0.0.0/8 -j RETURN  # 过宽，可能冲突
-$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -d 172.16.0.0/12 -j RETURN
-$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -d 255.255.255.255 -j RETURN
+if [ -n "$LAN_SUBNET" ] && [[ "$LAN_SUBNET" != 10.* ]] && [[ "$LAN_SUBNET" != 192.168.* ]] && [[ "$LAN_SUBNET" != 172.* ]]; then
+    $IPTABLES_CMD -t mangle -A TPROXY_CHAIN -d $LAN_SUBNET -j RETURN
+fi
+log "✅ 局域网豁免配置完成"
 
 # 6. TProxy 转发规则（最后匹配）
 if [ "$USE_EBPF" = "true" ]; then
