@@ -318,13 +318,20 @@ iptables -t mangle -N $CHAIN_NAME
 # ---- 规则详情 (完全同步原始版本最稳逻辑) ----
 log "🔗 正在配置 TProxy 规则..."
 
-# 1. 强制拦截已标记包的回环 (防死循环)
-iptables -t mangle -A $CHAIN_NAME -m mark --mark $TPROXY_MARK -j RETURN
+# 1. (已移除防回环检查，与原始版本保持一致)
+# iptables -t mangle -A $CHAIN_NAME -m mark --mark $TPROXY_MARK -j RETURN
 
 # 2. 豁免本地、局域网、广播 (目标地址豁免)
 for net in 127.0.0.0/8 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 255.255.255.255; do
   iptables -t mangle -A $CHAIN_NAME -d $net -j RETURN
 done
+
+# 2.5 豁免宿主机IP (双向)
+if [ -n "$MAIN_IP" ]; then
+    iptables -t mangle -A $CHAIN_NAME -s $MAIN_IP -j RETURN 2>/dev/null || true
+    iptables -t mangle -A $CHAIN_NAME -d $MAIN_IP -j RETURN 2>/dev/null || true
+    log "✅ 已豁免宿主机自身流量 (IP: $MAIN_IP)"
+fi
 
 # 3. 豁免 Docker 订阅端口
 iptables -t mangle -A $CHAIN_NAME -p tcp --dport $DOCKER_PORT -j RETURN
