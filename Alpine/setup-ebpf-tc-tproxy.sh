@@ -418,6 +418,10 @@ compile_ebpf() {
 #define TC_ACT_OK 0
 #endif
 
+#ifndef TC_ACT_OK
+#define TC_ACT_OK 0
+#endif
+
 EOFBPF
 
     # 添加动态定义
@@ -484,9 +488,9 @@ int tproxy_mark(struct __sk_buff *skb) {
 
     // 3. ⚠️ 终极防御：只打标来自局域网的包 !!
     // 这防止了来自互联网的流量误入 TProxy，解决了连接数瞬间爆表的问题。
-    bool src_is_lan = false;
+    int src_is_lan = 0;
     if ((s_val >> 24) == 10 || (s_val >> 16) == 0xc0a8 || (s_val >> 20) == 0xac1) {
-        src_is_lan = true;
+        src_is_lan = 1;
     }
     
     // 如果源 IP 不是私网地址，放行！不参与转发。
@@ -732,8 +736,9 @@ $IPTABLES_CMD -t mangle -A TPROXY_CHAIN -s 127.0.0.0/8 -j RETURN
 
 # 2. ⚠️ 关键：豁免宿主机自身流量 (双向)
 if [ -n "$MAIN_IP" ]; then
-    $IPTABLES_CMD -t mangle -A TPROXY_CHAIN -s $MAIN_IP -j RETURN
-    $IPTABLES_CMD -t mangle -A TPROXY_CHAIN -d $MAIN_IP -j RETURN
+    # 分开执行，防止某一条失败影响全局
+    $IPTABLES_CMD -t mangle -A TPROXY_CHAIN -s $MAIN_IP -j RETURN 2>/dev/null || true
+    $IPTABLES_CMD -t mangle -A TPROXY_CHAIN -d $MAIN_IP -j RETURN 2>/dev/null || true
     log "✅ 已豁免宿主机自身流量 (IP: $MAIN_IP)"
 fi
 
