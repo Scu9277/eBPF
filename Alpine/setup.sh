@@ -1380,11 +1380,16 @@ install_tproxy() {
     case $t_choice in
         1)
             echo -e "🔧 准备执行传统 iptables TProxy 脚本..."
-            TPROXY_SCRIPT_URL="https://raw.githubusercontent.com/Scu9277/eBPF/refs/heads/main/Alpine/setup-tproxy-ipv4.sh"
-            if safe_github_script_exec "$TPROXY_SCRIPT_URL"; then
-                echo -e "${GREEN}✅ iptables TProxy 脚本执行完毕！${NC}"
+            if [ -f "./setup-tproxy-ipv4.sh" ]; then
+                echo -e "${YELLOW}📂 检测到本地脚本，正在执行...${NC}"
+                bash ./setup-tproxy-ipv4.sh
             else
-                echo -e "${RED}❌ iptables TProxy 脚本执行失败。${NC}"
+                TPROXY_SCRIPT_URL="https://raw.githubusercontent.com/Scu9277/eBPF/refs/heads/main/Alpine/setup-tproxy-ipv4.sh"
+                if safe_github_script_exec "$TPROXY_SCRIPT_URL"; then
+                    echo -e "${GREEN}✅ iptables TProxy 脚本执行完毕！${NC}"
+                else
+                    echo -e "${RED}❌ iptables TProxy 脚本执行失败。${NC}"
+                fi
             fi
             ;;
         2)
@@ -1396,26 +1401,32 @@ install_tproxy() {
             echo -e "  - 性能比 iptables 提升 3-5 倍"
             echo -e "  - 如果 eBPF 不可用，自动回退到优化的 iptables 方案"
             echo ""
-            EBPF_SCRIPT_URL="https://raw.githubusercontent.com/Scu9277/eBPF/refs/heads/main/Alpine/setup-ebpf-tc-tproxy.sh"
-            echo -e "📥 正在下载并执行 eBPF TC TProxy 部署脚本..."
-            if safe_github_script_exec "$EBPF_SCRIPT_URL"; then
-                echo -e "${GREEN}✅ eBPF TC TProxy 部署完成！${NC}"
-                echo ""
-                echo -e "${YELLOW}💡 服务管理提示：${NC}"
-                if [ "$OS_DIST" == "alpine" ]; then
-                    echo -e "  启动: ${CYAN}rc-service ebpf-tproxy start${NC}"
-                    echo -e "  停止: ${CYAN}rc-service ebpf-tproxy stop${NC}"
-                    echo -e "  状态: ${CYAN}rc-service ebpf-tproxy status${NC}"
-                    echo -e "  日志: ${CYAN}tail -f /var/log/ebpf-tproxy.log${NC}"
-                else
-                    echo -e "  启动: ${CYAN}systemctl start ebpf-tproxy${NC}"
-                    echo -e "  停止: ${CYAN}systemctl stop ebpf-tproxy${NC}"
-                    echo -e "  状态: ${CYAN}systemctl status ebpf-tproxy${NC}"
-                    echo -e "  日志: ${CYAN}journalctl -u ebpf-tproxy -f${NC}"
-                fi
+            
+            if [ -f "./setup-ebpf-tc-tproxy.sh" ]; then
+                echo -e "${YELLOW}📂 检测到本地脚本，正在执行...${NC}"
+                bash ./setup-ebpf-tc-tproxy.sh
             else
-                echo -e "${RED}❌ eBPF TC TProxy 部署失败。${NC}"
-                echo -e "${YELLOW}💡 提示：请检查网络连接或查看错误信息${NC}"
+                EBPF_SCRIPT_URL="https://raw.githubusercontent.com/Scu9277/eBPF/refs/heads/main/Alpine/setup-ebpf-tc-tproxy.sh"
+                echo -e "📥 正在下载并执行 eBPF TC TProxy 部署脚本..."
+                if safe_github_script_exec "$EBPF_SCRIPT_URL"; then
+                    echo -e "${GREEN}✅ eBPF TC TProxy 部署完成！${NC}"
+                    echo ""
+                    echo -e "${YELLOW}💡 服务管理提示：${NC}"
+                    if [ "$OS_DIST" == "alpine" ]; then
+                        echo -e "  启动: ${CYAN}rc-service ebpf-tproxy start${NC}"
+                        echo -e "  停止: ${CYAN}rc-service ebpf-tproxy stop${NC}"
+                        echo -e "  状态: ${CYAN}rc-service ebpf-tproxy status${NC}"
+                        echo -e "  日志: ${CYAN}tail -f /var/log/ebpf-tproxy.log${NC}"
+                    else
+                        echo -e "  启动: ${CYAN}systemctl start ebpf-tproxy${NC}"
+                        echo -e "  停止: ${CYAN}systemctl stop ebpf-tproxy${NC}"
+                        echo -e "  状态: ${CYAN}systemctl status ebpf-tproxy${NC}"
+                        echo -e "  日志: ${CYAN}journalctl -u ebpf-tproxy -f${NC}"
+                    fi
+                else
+                    echo -e "${RED}❌ eBPF TC TProxy 部署失败。${NC}"
+                    echo -e "${YELLOW}💡 提示：请检查网络连接或查看错误信息${NC}"
+                fi
             fi
             ;;
         3)
