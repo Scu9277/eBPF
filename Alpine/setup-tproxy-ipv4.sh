@@ -335,19 +335,19 @@ if [ -n "$MAIN_IP" ]; then
     log "✅ 已豁免宿主机自身流量 (IP: $MAIN_IP)"
 fi
 
-# 3. 豁免宿主机服务端口 (22, 123, 80, 443, 9090, 9420)
+# 3. 豁免宿主机核心服务端口 (22, 123, 80, 9090, 9420)
 iptables -t mangle -A $CHAIN_NAME -p tcp --dport 22 -j RETURN    # SSH
 iptables -t mangle -A $CHAIN_NAME -p udp --dport 123 -j RETURN   # NTP
 iptables -t mangle -A $CHAIN_NAME -p tcp --dport 80 -j RETURN    # HTTP
-# iptables -t mangle -A $CHAIN_NAME -p tcp --dport 443 -j RETURN  # ⚠️ 不要豁免 443，那是主要加密流量
 iptables -t mangle -A $CHAIN_NAME -p tcp --dport 9090 -j RETURN  # Mihomo UI
 iptables -t mangle -A $CHAIN_NAME -p tcp --dport $TPROXY_PORT -j RETURN  # TProxy 端口
-log "✅ 已豁免宿主机服务端口 (22, 123, 80, 9090, $TPROXY_PORT)"
+log "✅ 已豁免宿主机核心端口"
 
 # !! 关键修复：拦截 QUIC (UDP 443) !!
-# 这会迫使浏览器回退到 TCP，从而能被稳定的代理。你的原始脚本里有这一条，这是成功的关键！
-iptables -t mangle -A $CHAIN_NAME -p udp --dport 443 -j REJECT
-log "✅ 已强行拦截 QUIC (UDP 443) 流量以启用 TCP 回退"
+# 这会迫使浏览器回退到 TCP，从而能被稳定的代理。
+# 注意：在 mangle 表中必须使用 DROP 而不是 REJECT，否则 Alpine 会报 Invalid argument
+iptables -t mangle -A $CHAIN_NAME -p udp --dport 443 -j DROP
+log "✅ 已拦截 QUIC (UDP 443) 流量"
 
 # 4. 豁免 Docker 订阅端口
 iptables -t mangle -A $CHAIN_NAME -p tcp --dport $DOCKER_PORT -j RETURN
@@ -360,7 +360,8 @@ for net in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 127.0.0.0/8 255.255.255.255; 
 done
 
 # 如果有检测到额外网段，补充豁免
-      iptables -t mangle -A $CHAIN_NAME -d $LAN_SUBNET -j RETURN
+if [ -n "$LAN_SUBNET" ] && [[ "$LAN_SUBNET" != 10.* ]] && [[ "$LAN_SUBNET" != 192.168.* ]] && [[ "$LAN_SUBNET" != 172.* ]]; then
+    iptables -t mangle -A $CHAIN_NAME -d $LAN_SUBNET -j RETURN 2>/dev/null || true
 fi
 log "✅ 局域网豁免配置完成"
 
