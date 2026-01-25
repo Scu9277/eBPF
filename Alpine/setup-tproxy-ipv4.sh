@@ -315,64 +315,30 @@ ip route flush table $TABLE_ID 2>/dev/null || true
 # ---- 创建新链 ----
 iptables -t mangle -N $CHAIN_NAME
 
-# !! 关键修复：防止回环 (如果包已经带了标记，直接跳过)
+# ---- 规则详情 (完全同步原始版本最稳逻辑) ----
+log "🔗 正在配置 TProxy 规则..."
+
+# 1. 强制拦截已标记包的回环 (防死循环)
 iptables -t mangle -A $CHAIN_NAME -m mark --mark $TPROXY_MARK -j RETURN
-log "✅ 已开启防回环保护 (Mark: $TPROXY_MARK)"
 
-# ⚠️ 关键修复：优化规则顺序，正确处理网关模式
-log "🔗 配置 iptables TProxy 规则..."
-
-# 规则优先级：本地回环 > 宿主机自身流量 > 服务端口 > 局域网 > TProxy
-
-# 1. 豁免本地回环（最高优先级）
-iptables -t mangle -A $CHAIN_NAME -d 127.0.0.0/8 -j RETURN
-iptables -t mangle -A $CHAIN_NAME -s 127.0.0.0/8 -j RETURN
-
-# 2. ⚠️ 关键：豁免宿主机自身流量 (双向)
-if [ -n "$MAIN_IP" ]; then
-    iptables -t mangle -A $CHAIN_NAME -s $MAIN_IP -j RETURN 2>/dev/null || true
-    iptables -t mangle -A $CHAIN_NAME -d $MAIN_IP -j RETURN 2>/dev/null || true
-    log "✅ 已豁免宿主机自身流量 (IP: $MAIN_IP)"
-fi
-
-# 3. 豁免宿主机核心服务端口 (22, 123, 80, 9090, 9420)
-iptables -t mangle -A $CHAIN_NAME -p tcp --dport 22 -j RETURN    # SSH
-iptables -t mangle -A $CHAIN_NAME -p udp --dport 123 -j RETURN   # NTP
-iptables -t mangle -A $CHAIN_NAME -p tcp --dport 80 -j RETURN    # HTTP
-iptables -t mangle -A $CHAIN_NAME -p tcp --dport 9090 -j RETURN  # Mihomo UI
-iptables -t mangle -A $CHAIN_NAME -p tcp --dport $TPROXY_PORT -j RETURN  # TProxy 端口
-log "✅ 已豁免宿主机核心端口"
-
-# !! 关键修复：拦截 QUIC (UDP 443) !!
-# 这会迫使浏览器回退到 TCP，从而能被稳定的代理。
-# 注意：在 mangle 表中必须使用 DROP 而不是 REJECT，否则 Alpine 会报 Invalid argument
-iptables -t mangle -A $CHAIN_NAME -p udp --dport 443 -j DROP
-log "✅ 已拦截 QUIC (UDP 443) 流量"
-
-# 4. 豁免 Docker 订阅端口
-iptables -t mangle -A $CHAIN_NAME -p tcp --dport $DOCKER_PORT -j RETURN
-iptables -t mangle -A $CHAIN_NAME -p udp --dport $DOCKER_PORT -j RETURN
-
-# 5. 豁免局域网、内网地址块 (恢复原始版本最稳逻辑)
-log "🔗 正在配置局域网豁免规则..."
-for net in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 127.0.0.0/8 255.255.255.255; do
+# 2. 豁免本地、局域网、广播 (目标地址豁免)
+for net in 127.0.0.0/8 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 255.255.255.255; do
   iptables -t mangle -A $CHAIN_NAME -d $net -j RETURN
 done
 
-# 如果有检测到额外网段，补充豁免
-if [ -n "$LAN_SUBNET" ] && [[ "$LAN_SUBNET" != 10.* ]] && [[ "$LAN_SUBNET" != 192.168.* ]] && [[ "$LAN_SUBNET" != 172.* ]]; then
-    iptables -t mangle -A $CHAIN_NAME -d $LAN_SUBNET -j RETURN 2>/dev/null || true
-fi
-log "✅ 局域网豁免配置完成"
+# 3. 豁免 Docker 订阅端口
+iptables -t mangle -A $CHAIN_NAME -p tcp --dport $DOCKER_PORT -j RETURN
+iptables -t mangle -A $CHAIN_NAME -p udp --dport $DOCKER_PORT -j RETURN
 
-# 6. TProxy 转发规则 (⚠️ 最终防御：仅处理来自局域网的合法客户端流量)
-# 这防止了来自互联网的随机流量误入 TProxy，解决了连接数爆表的问题。
-log "🔗 正在配置 TProxy 转发逻辑 (仅限局域网来源)..."
-for net in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16; do
-  iptables -t mangle -A $CHAIN_NAME -s $net -p tcp -j TPROXY --on-port $TPROXY_PORT --tproxy-mark $TPROXY_MARK
-  iptables -t mangle -A $CHAIN_NAME -s $net -p udp -j TPROXY --on-port $TPROXY_PORT --tproxy-mark $TPROXY_MARK
-done
-log "✅ TProxy 转发规则配置完成"
+# 4. 拦截 QUIC (UDP 443) 以强制回退 TCP
+# 注意：Alpine mangle 表用 DROP 替代 REJECT，避免 Invalid argument
+iptables -t mangle -A $CHAIN_NAME -p udp --dport 443 -j DROP
+
+# 5. TProxy 转发 (核心转发逻辑)
+iptables -t mangle -A $CHAIN_NAME -p tcp -j TPROXY --on-port $TPROXY_PORT --tproxy-mark $TPROXY_MARK
+iptables -t mangle -A $CHAIN_NAME -p udp -j TPROXY --on-port $TPROXY_PORT --tproxy-mark $TPROXY_MARK
+
+log "✅ TProxy 规则配置完成"
 
 # Hook 到 PREROUTING
 iptables -t mangle -I PREROUTING -j $CHAIN_NAME

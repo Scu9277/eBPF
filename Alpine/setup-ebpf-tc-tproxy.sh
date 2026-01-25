@@ -458,41 +458,33 @@ int tproxy_mark(struct __sk_buff *skb) {
     if ((void *)ip + sizeof(*ip) > data_end)
         return TC_ACT_OK;
     
-    // 2. 核心豁免逻辑
+    // 2. 核心豁免逻辑 (同步原始版本最稳逻辑)
     __be32 saddr = ip->saddr;
     __be32 daddr = ip->daddr;
     __u32 s_val = bpf_ntohl(saddr);
     __u32 d_val = bpf_ntohl(daddr);
     
-    // 2.1 放行本地回环
+    // 2.1 放行本地回环 (127.0.0.0/8)
     if ((s_val >> 24) == 127 || (d_val >> 24) == 127)
         return TC_ACT_OK;
 
-    // 2.2 豁免宿主机自身流量 (目标是宿主机，或是宿主机发出的)
+    // 2.2 ⚠️ 宿主机双向豁免 (10.0.0.x)
+    // 解决 UI/SSH/节点心跳响应被错误拦截导致的 Offline 和 500 报错
 #ifdef HOST_IP
     if (daddr == bpf_htonl(HOST_IP) || saddr == bpf_htonl(HOST_IP)) {
         return TC_ACT_OK;
     }
 #endif
     
-    // 2.3 局域网目标放行 (直连)
-    if ((d_val >> 24) == 10 || (d_val >> 16) == 0xc0a8 || (d_val >> 20) == 0xac1)
-        return TC_ACT_OK;
+    // 2.3 局域网目标暴力放行 (目标地址豁免：10/8, 172/12, 192/16)
+    if ((d_val >> 24) == 10) return TC_ACT_OK;
+    if ((d_val >> 16) == 0xc0a8) return TC_ACT_OK;
+    if ((d_val >> 20) == 0xac1) return TC_ACT_OK;
     
     // 2.4 组播/广播放行
     if (d_val >= 0xe0000000) return TC_ACT_OK;
 
-    // 3. ⚠️ 终极防御：只打标来自局域网的包 !!
-    // 这防止了来自互联网的流量误入 TProxy，解决了连接数瞬间爆表的问题。
-    int src_is_lan = 0;
-    if ((s_val >> 24) == 10 || (s_val >> 16) == 0xc0a8 || (s_val >> 20) == 0xac1) {
-        src_is_lan = 1;
-    }
-    
-    // 如果源 IP 不是私网地址，放行！不参与转发。
-    if (!src_is_lan) return TC_ACT_OK;
-
-    // 4. 标记合法客户端流量 (进入代理流程)
+    // 3. 标记数据包 (进入 TProxy)
     skb->mark = TPROXY_MARK;
     
     return TC_ACT_OK;
