@@ -386,9 +386,9 @@ compile_ebpf() {
     if [ -n "$MAIN_INTERFACE" ]; then
         local host_ip=$(ip -4 addr show "$MAIN_INTERFACE" 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d/ -f1 | head -n1)
         if [ -n "$host_ip" ]; then
+            local ip_parts_raw=($(echo "$host_ip" | tr '.' ' '))
             # Network byte order (Big Endian) 
-            # 10.0.0.58 -> 0x3a00000a (BE) 
-            host_ip_hex=$(printf "0x%02x%02x%02x%02x" ${ip_parts[0]} ${ip_parts[1]} ${ip_parts[2]} ${ip_parts[3]})
+            host_ip_hex=$(printf "0x%02x%02x%02x%02x" ${ip_parts_raw[0]} ${ip_parts_raw[1]} ${ip_parts_raw[2]} ${ip_parts_raw[3]})
             echo -e "${YELLOW}   宿主机 IP: $host_ip (hex: $host_ip_hex)${NC}"
         fi
     fi
@@ -450,30 +450,53 @@ int tproxy_mark(struct __sk_buff *skb) {
     __be32 saddr = ip->saddr;
     __be32 daddr = ip->daddr;
     
-    // ⚠️ 修复：Endianness 匹配。ip->saddr 是 Big Endian
+    // 1. 豁免本地回环
+    if ((bpf_ntohl(saddr) & 0xff000000) == 0x7f000000 || (bpf_ntohl(daddr) & 0xff000000) == 0x7f000000)
+        return TC_ACT_OK;
+
+    // 2. 豁免宿主机自己发出的流量 (BE 匹配)
 #ifdef HOST_IP
     if (saddr == bpf_htonl(HOST_IP)) {
         return TC_ACT_OK;
     }
 #endif
     
-    // 跳过本地回环
-    if ((bpf_ntohl(saddr) & 0xff000000) == 0x7f000000 || (bpf_ntohl(daddr) & 0xff000000) == 0x7f000000)
+    // 3. 拦截 QUIC (UDP 443) - 不打标，因为我们要让 iptables REJECT 它
+    // 或者就在这里 RETURN，让后面的 iptables 规则处理
+    
+    // 4. 关键：豁免常见服务端口 (防止标记泄漏导致回环)
+    // 解析端口需要检查协议和长度
+    __u16 dport = 0;
+    if (ip->protocol == IPPROTO_TCP) {
+        struct tcphdr *tcp = data + sizeof(*ip);
+        if (data + sizeof(*ip) + sizeof(*tcp) <= data_end) {
+            dport = bpf_ntohs(tcp->dest);
+        }
+    } else if (ip->protocol == IPPROTO_UDP) {
+        struct udphdr *udp = data + sizeof(*ip);
+        if (data + sizeof(*ip) + sizeof(*udp) <= data_end) {
+            dport = bpf_ntohs(udp->dest);
+        }
+    }
+
+    // SSH(22), NTP(123), HTTP(80), MihomoUI(9090), TProxy(9420)
+    if (dport == 22 || dport == 123 || dport == 80 || dport == 9090 || dport == 9420) {
         return TC_ACT_OK;
+    }
     
-    // ⚠️ 关键改进：广义局域网豁免 (192.168.x.x, 10.x.x.x, 172.16.x.x)
-    // 这样最稳，不会出现 Fake-IP 冲突或漏通
+    // 5. 广义局域网豁免 (192.168.x.x, 10.x.x.x, 172.16.x.x 等)
+    // 这一步决定了“直连”还是“代理”
     
-    // 192.168.0.0/16 (0xC0A80000)
+    // 192.168.0.0/16
     if ((bpf_ntohl(daddr) & 0xffff0000) == 0xc0a80000) return TC_ACT_OK;
-    // 10.0.0.0/8 (0x0A000000)
+    // 10.0.0.0/8
     if ((bpf_ntohl(daddr) & 0xff000000) == 0x0a000000) return TC_ACT_OK;
-    // 172.16.0.0/12 (0xAC100000)
+    // 172.16.0.0/12
     if ((bpf_ntohl(daddr) & 0xfff00000) == 0xac100000) return TC_ACT_OK;
-    // 127.0.0.0/8
-    if ((bpf_ntohl(daddr) & 0xff000000) == 0x7f000000) return TC_ACT_OK;
+    // 默认组播/广播
+    if (bpf_ntohl(daddr) >= 0xe0000000) return TC_ACT_OK;
     
-    // 标记数据包
+    // 标记数据包 (进入代理流程)
     skb->mark = TPROXY_MARK;
     
     return TC_ACT_OK;
@@ -718,17 +741,14 @@ if [ -n "$MAIN_IP" ]; then
     log "✅ 已豁免宿主机发出的流量 (源: $MAIN_IP)"
 fi
 
-# 3. 豁免宿主机服务端口 (22, 123, 80, 443, 9090, 9420)
+# 3. 豁免宿主机核心服务端口 (仅保留最基础保障)
 $IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp --dport 22 -j RETURN    # SSH
-$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p udp --dport 123 -j RETURN   # NTP
-$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp --dport 80 -j RETURN    # HTTP
-# $IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp --dport 443 -j RETURN
-$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp --dport 9090 -j RETURN  # Mihomo UI
 $IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp --dport $TPROXY_PORT -j RETURN  # TProxy 端口
-log "✅ 已豁免宿主机服务端口 (22, 123, 80, 9090, $TPROXY_PORT)"
+# 注意：9090(UI), 123(NTP), 80(HTTP) 已经在 eBPF C 代码层精准豁免，彻底杜绝标记泄露导致的回环
+log "✅ 已配置 iptables 基础端口豁免"
 
 # !! 关键修复：拦截 QUIC (UDP 443) !!
-# 这会迫使浏览器回退到 TCP，从而能被稳定的代理。你的原始脚本里有这一条，这是成功的关键！
+# 这会迫使浏览器回退到 TCP，从而能被稳定的代理。
 $IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p udp --dport 443 -j REJECT
 log "✅ 已强行拦截 QUIC (UDP 443) 流量以启用 TCP 回退"
 
