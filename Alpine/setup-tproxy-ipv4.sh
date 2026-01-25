@@ -1,13 +1,14 @@
 #!/bin/bash
 # ==========================================
-# 🧠 Sing-box IPv4 TProxy 一键配置脚本
+# 🧠 Sing-box IPv4 TProxy 一键配置脚本 (优化版)
 # 
 # 作者: shangkouyou Duang Scu
 # 微信: shangkouyou
 # 邮箱: shangkouyou@gmail.com
-# 版本: v1.4 (Alpine Support)
+# 版本: v1.5 (Gateway Mode Fixed)
 #
 # 更新日志:
+# - v1.5: 修复网关模式流量豁免逻辑，添加智能等待，完整验证
 # - v1.4: 完整支持 Alpine Linux 系统 (OpenRC)
 # - v1.3: 修复 TPROXY 链名称冲突
 # ==========================================
@@ -16,23 +17,21 @@
 if [ -z "$BASH_VERSION" ]; then
     echo "⚠️  此脚本需要 bash 环境。正在尝试安装 bash..."
     if [ -f /etc/alpine-release ]; then
-        # Alpine 系统
-        if ! command -v bash >/dev/null 2>&1; then
+        if ! command -v bash > /dev/null 2>&1; then
             echo "📦 正在安装 bash..."
-            apk update >/dev/null 2>&1
-            apk add --no-cache bash >/dev/null 2>&1
+            apk update > /dev/null 2>&1
+            apk add --no-cache bash > /dev/null 2>&1
         fi
-        if command -v bash >/dev/null 2>&1; then
+        if command -v bash > /dev/null 2>&1; then
             echo "✅ bash 已就绪，正在使用 bash 重新执行脚本..."
             exec bash "$0" "$@"
         else
             echo "❌ 无法安装 bash，请手动执行: apk add bash && bash $0"
             exit 1
         fi
-    elif command -v apt-get >/dev/null 2>&1; then
-        # Debian/Ubuntu 系统
-        if ! command -v bash >/dev/null 2>&1; then
-            apt-get update -y >/dev/null 2>&1 && apt-get install -y bash >/dev/null 2>&1
+    elif command -v apt-get > /dev/null 2>&1; then
+        if ! command -v bash > /dev/null 2>&1; then
+            apt-get update -y > /dev/null 2>&1 && apt-get install -y bash > /dev/null 2>&1
         fi
         exec bash "$0" "$@"
     else
@@ -76,7 +75,7 @@ AUTHOR_WECHAT="shangkouyou"
 AUTHOR_EMAIL="shangkouyou@gmail.com"
 AFF_URL="https://aff.scu.indevs.in/"
 
-# !! 修复点：定义一个不与内核目标冲突的自定义链名称
+# 自定义链名称
 CUSTOM_CHAIN="TPROXY_CHAIN"
 
 # 展示作者信息
@@ -115,45 +114,43 @@ echo "[$(date '+%F %T')] 📋 检测到系统类型: $OS_DIST" | tee -a "$LOG_FI
 mkdir -p "$TPROXY_DIR"
 
 # ---- 检查包管理器 ----
-if command -v apt >/dev/null 2>&1; then
+if command -v apt > /dev/null 2>&1; then
   PKG_INSTALL="apt install -y"
   PKG_UPDATE="apt update -y"
-elif command -v apk >/dev/null 2>&1; then
+elif command -v apk > /dev/null 2>&1; then
   PKG_INSTALL="apk add"
   PKG_UPDATE="apk update"
-elif command -v dnf >/dev/null 2>&1; then
+elif command -v dnf > /dev/null 2>&1; then
   PKG_INSTALL="dnf install -y"
   PKG_UPDATE="dnf makecache"
-elif command -v yum >/dev/null 2>&1; then
+elif command -v yum > /dev/null 2>&1; then
   PKG_INSTALL="yum install -y"
   PKG_UPDATE="yum makecache"
 else
-  echo "❌ 无法识别包管理器，请手动安装 iptables/iproute2/systemd" | tee -a "$LOG_FILE"
+  echo "❌ 无法识别包管理器，请手动安装 iptables/iproute2" | tee -a "$LOG_FILE"
   exit 1
 fi
 
 # ---- 检查并安装依赖 ----
-# Alpine 不需要 systemd，使用 OpenRC
 MISSING_PKGS=()
 
 # 检查 iptables
-if ! command -v iptables >/dev/null 2>&1; then
+if ! command -v iptables > /dev/null 2>&1; then
   MISSING_PKGS+=("iptables")
 fi
 
 # 检查 iproute2 (通过 ip 命令)
-if ! command -v ip >/dev/null 2>&1; then
-  if [ "$OS_DIST" == "alpine" ]; then
-    MISSING_PKGS+=("iproute2")
-  else
-    MISSING_PKGS+=("iproute2")
-  fi
+if ! command -v ip > /dev/null 2>&1; then
+  MISSING_PKGS+=("iproute2")
 fi
 
-# 对于非 Alpine 系统，检查 systemctl（但不强制安装 systemd，因为通常是系统核心组件）
-if [ "$OS_DIST" != "alpine" ] && ! command -v systemctl >/dev/null 2>&1; then
-  echo "[$(date '+%F %T')] ⚠️  警告：未检测到 systemctl，但 systemd 通常是系统核心组件，请手动安装" | tee -a "$LOG_FILE"
-  echo "[$(date '+%F %T')] 💡 提示：如果确实需要安装 systemd，请根据您的发行版手动安装" | tee -a "$LOG_FILE"
+# 检查 net-tools (netstat)
+if ! command -v netstat > /dev/null 2>&1; then
+  if [ "$OS_DIST" == "alpine" ]; then
+    MISSING_PKGS+=("net-tools")
+  else
+    MISSING_PKGS+=("net-tools")
+  fi
 fi
 
 if [ ${#MISSING_PKGS[@]} -gt 0 ]; then
@@ -164,11 +161,9 @@ else
 fi
 
 # ---- 切换到 iptables-legacy (若存在) ----
-# Debian 13 (Trixie) 默认使用 nftables，TProxy 必须用 legacy
-# Alpine 默认使用 iptables-legacy，无需切换
 if [ "$OS_DIST" != "alpine" ]; then
-  if command -v update-alternatives >/dev/null 2>&1; then
-    if command -v iptables-legacy >/dev/null 2>&1; then
+  if command -v update-alternatives > /dev/null 2>&1; then
+    if command -v iptables-legacy > /dev/null 2>&1; then
       update-alternatives --set iptables /usr/sbin/iptables-legacy || true
       update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy || true
       echo "[$(date '+%F %T')] 🔁 已强制切换到 iptables-legacy 模式" | tee -a "$LOG_FILE"
@@ -188,7 +183,7 @@ for mod in xt_TPROXY nf_tproxy_ipv4; do
 done
 
 # ---- 启用 IPv4 转发 ----
-sysctl -w net.ipv4.ip_forward=1 >/dev/null
+sysctl -w net.ipv4.ip_forward=1 > /dev/null
 grep -q '^net.ipv4.ip_forward' /etc/sysctl.conf && sed -i '/net.ipv4.ip_forward/d' /etc/sysctl.conf
 echo "net.ipv4.ip_forward = 1" >> /etc/sysctl.conf
 echo "[$(date '+%F %T')] 🔧 已启用 IPv4 转发" | tee -a "$LOG_FILE"
@@ -205,10 +200,15 @@ else
 fi
 
 # ---- 写入 IPv4 TProxy 脚本 ----
-cat > "$TPROXY_SCRIPT" <<EOF
+cat > "$TPROXY_SCRIPT" <<'EOF'
 #!/bin/bash
-# IPv4-only TProxy for sing-box (Gateway/PREROUTING Only)
-# ** 修复：使用 $CUSTOM_CHAIN 代替 TPROXY 作为链名称 **
+# IPv4 TProxy for Mihomo (Gateway Mode - 优化版)
+# 修复网关模式流量豁免逻辑，添加智能等待和完整验证
+
+EOF
+
+# 添加配置变量
+cat >> "$TPROXY_SCRIPT" <<EOF
 LOG_FILE="/var/log/tproxy.log"
 TPROXY_PORT=$TPROXY_PORT
 TPROXY_MARK=$TPROXY_MARK
@@ -216,110 +216,278 @@ TABLE_ID=$TABLE_ID
 DOCKER_PORT=$DOCKER_PORT
 CHAIN_NAME="$CUSTOM_CHAIN"
 
-echo "[$(date '+%F %T')] 开始加载 IPv4 TProxy 规则 (链: \$CHAIN_NAME)..." | tee -a "\$LOG_FILE"
+EOF
 
-# ⚠️ 重要：检查 mihomo 是否运行
-echo "[$(date '+%F %T')] 🔍 正在检查 mihomo 服务状态..." | tee -a "\$LOG_FILE"
-if command -v systemctl >/dev/null 2>&1; then
-    if ! systemctl is-active --quiet mihomo.service 2>/dev/null; then
-        echo "[$(date '+%F %T')] ❌ 错误：mihomo 服务未运行！请先启动 mihomo 服务" | tee -a "\$LOG_FILE"
-        exit 1
-    fi
-elif command -v rc-service >/dev/null 2>&1; then
-    if ! rc-service mihomo status >/dev/null 2>&1; then
-        echo "[$(date '+%F %T')] ❌ 错误：mihomo 服务未运行！请先启动 mihomo 服务" | tee -a "\$LOG_FILE"
-        exit 1
-    fi
+# 添加脚本主体
+cat >> "$TPROXY_SCRIPT" <<'EOF'
+log() {
+    echo "[$(date '+%F %T')] $1" | tee -a "$LOG_FILE"
+}
+
+# 智能等待 Mihomo 启动函数
+wait_for_mihomo() {
+    local max_wait=60
+    local waited=0
+    local check_interval=2
+    
+    log "⏳ 正在等待 Mihomo 服务就绪..."
+    
+    while [ $waited -lt $max_wait ]; do
+        # 检查服务状态
+        local service_running=false
+        if command -v systemctl > /dev/null 2>&1; then
+            if systemctl is-active --quiet mihomo.service 2>/dev/null; then
+                service_running=true
+            fi
+        elif command -v rc-service > /dev/null 2>&1; then
+            if rc-service mihomo status > /dev/null 2>&1; then
+                service_running=true
+            fi
+        fi
+        
+        if [ "$service_running" = true ]; then
+            # 服务运行中，检查端口是否监听
+            sleep 2
+            
+            if command -v netstat > /dev/null 2>&1; then
+                if netstat -tuln 2>/dev/null | grep -q ":$TPROXY_PORT "; then
+                    log "✅ Mihomo 服务已就绪 (等待时间: ${waited}s)"
+                    return 0
+                fi
+            elif command -v ss > /dev/null 2>&1; then
+                if ss -tuln 2>/dev/null | grep -q ":$TPROXY_PORT "; then
+                    log "✅ Mihomo 服务已就绪 (等待时间: ${waited}s)"
+                    return 0
+                fi
+            else
+                log "✅ Mihomo 服务已启动 (等待时间: ${waited}s)"
+                return 0
+            fi
+        fi
+        
+        sleep $check_interval
+        waited=$((waited + check_interval))
+        
+        if [ $((waited % 10)) -eq 0 ]; then
+            log "   仍在等待 Mihomo... (已等待 ${waited}s)"
+        fi
+    done
+    
+    log "❌ 等待 Mihomo 超时 (${max_wait}s)"
+    return 1
+}
+
+log "🚀 开始配置 IPv4 TProxy..."
+
+# ⚠️ 智能等待 Mihomo 启动
+if ! wait_for_mihomo; then
+    log "❌ Mihomo 服务未就绪，无法继续配置 TProxy"
+    exit 1
 fi
-echo "[$(date '+%F %T')] ✅ mihomo 服务正在运行" | tee -a "\$LOG_FILE"
 
-# 检测主网卡（兼容 BusyBox，不使用 -P 选项）
-MAIN_IF=\$(ip -4 route show default 2>/dev/null | grep -o 'dev [^ ]*' | awk '{print \$2}' | head -n1)
-if [ -z "\$MAIN_IF" ]; then
-    # 备用方法：获取第一个非 lo 的网卡
-    MAIN_IF=\$(ip -4 link show | grep -E '^[0-9]+:' | grep -v 'lo:' | head -n1 | awk -F': ' '{print \$2}' | awk '{print \$1}')
+# 检测主网卡
+MAIN_IF=$(ip -4 route show default 2>/dev/null | grep -o 'dev [^ ]*' | awk '{print $2}' | head -n1)
+if [ -z "$MAIN_IF" ]; then
+    MAIN_IF=$(ip -4 link show | grep -E '^[0-9]+:' | grep -v 'lo:' | head -n1 | awk -F': ' '{print $2}' | awk '{print $1}')
 fi
 
 # 检测主网卡 IP
-if [ -n "\$MAIN_IF" ]; then
-    MAIN_IP=\$(ip -4 addr show "\$MAIN_IF" 2>/dev/null | grep 'inet ' | awk '{print \$2}' | cut -d/ -f1 | head -n1)
+if [ -n "$MAIN_IF" ]; then
+    MAIN_IP=$(ip -4 addr show "$MAIN_IF" 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d/ -f1 | head -n1)
 else
     MAIN_IP=""
 fi
 
-if [ -n "\$MAIN_IF" ] && [ -n "\$MAIN_IP" ]; then
-    echo "检测到主网卡: \$MAIN_IF (\$MAIN_IP)" | tee -a "\$LOG_FILE"
+if [ -n "$MAIN_IF" ] && [ -n "$MAIN_IP" ]; then
+    log "✅ 检测到主网卡: $MAIN_IF ($MAIN_IP)"
 else
-    echo "⚠️  未能检测到主网卡，将跳过服务器 IP 豁免规则" | tee -a "\$LOG_FILE"
+    log "⚠️  未能检测到主网卡 IP"
 fi
 
 # ---- 安全清理旧规则 ----
-# 清理跳转规则
-iptables -t mangle -D PREROUTING -j \$CHAIN_NAME 2>/dev/null || true
-# 清空并删除旧链
-iptables -t mangle -F \$CHAIN_NAME 2>/dev/null || true
-iptables -t mangle -X \$CHAIN_NAME 2>/dev/null || true
-# 清理策略路由
-ip rule del fwmark \$TPROXY_MARK table \$TABLE_ID 2>/dev/null || true
-ip route flush table \$TABLE_ID 2>/dev/null || true
+log "🧹 正在清理旧规则..."
+iptables -t mangle -D PREROUTING -j $CHAIN_NAME 2>/dev/null || true
+iptables -t mangle -F $CHAIN_NAME 2>/dev/null || true
+iptables -t mangle -X $CHAIN_NAME 2>/dev/null || true
+ip rule del fwmark $TPROXY_MARK table $TABLE_ID 2>/dev/null || true
+ip route flush table $TABLE_ID 2>/dev/null || true
 
 # ---- 创建新链 ----
-iptables -t mangle -N \$CHAIN_NAME
+iptables -t mangle -N $CHAIN_NAME
 
-# ---- 规则详情（优化顺序：优先豁免宿主机流量） ----
+# ⚠️ 关键修复：优化规则顺序，正确处理网关模式
+log "🔗 配置 iptables TProxy 规则..."
 
-# ⚠️ 重要：优先豁免宿主机流量，确保宿主机网络不受影响
+# 规则优先级：本地回环 > 宿主机自身流量 > 服务端口 > 局域网 > TProxy
 
-# 1. 豁免宿主机发出的流量（源地址是宿主机 IP）- 最高优先级
-if [ -n "\$MAIN_IP" ]; then
-    iptables -t mangle -A \$CHAIN_NAME -s \$MAIN_IP -j RETURN
-    echo "[$(date '+%F %T')] ✅ 已豁免宿主机发出的流量 (源: \$MAIN_IP)" | tee -a "\$LOG_FILE"
+# 1. 豁免本地回环（最高优先级）
+iptables -t mangle -A $CHAIN_NAME -d 127.0.0.0/8 -j RETURN
+iptables -t mangle -A $CHAIN_NAME -s 127.0.0.0/8 -j RETURN
+
+# 2. ⚠️ 关键：只豁免宿主机自己发出的流量（源地址是宿主机 IP）
+#    不豁免发往宿主机的流量，因为客户端流量的目标是外网，不是宿主机
+if [ -n "$MAIN_IP" ]; then
+    iptables -t mangle -A $CHAIN_NAME -s $MAIN_IP -j RETURN
+    log "✅ 已豁免宿主机发出的流量 (源: $MAIN_IP)"
 fi
 
-# 2. 豁免发往宿主机的流量（目标地址是宿主机 IP）- 放行入站流量转发
-if [ -n "\$MAIN_IP" ]; then
-    iptables -t mangle -A \$CHAIN_NAME -d \$MAIN_IP -j RETURN
-    echo "[$(date '+%F %T')] ✅ 已豁免发往宿主机的流量 (目标: \$MAIN_IP)" | tee -a "\$LOG_FILE"
+# 3. 豁免宿主机服务端口（基于目标端口）
+iptables -t mangle -A $CHAIN_NAME -p tcp --dport 22 -j RETURN    # SSH
+iptables -t mangle -A $CHAIN_NAME -p tcp --dport 80 -j RETURN    # HTTP
+iptables -t mangle -A $CHAIN_NAME -p tcp --dport 443 -j RETURN   # HTTPS
+iptables -t mangle -A $CHAIN_NAME -p tcp --dport 9090 -j RETURN  # Mihomo UI
+iptables -t mangle -A $CHAIN_NAME -p tcp --dport $TPROXY_PORT -j RETURN  # TProxy 端口
+log "✅ 已豁免宿主机服务端口 (22, 80, 443, 9090, $TPROXY_PORT)"
+
+# 4. 豁免 Docker 订阅端口
+iptables -t mangle -A $CHAIN_NAME -p tcp --dport $DOCKER_PORT -j RETURN
+iptables -t mangle -A $CHAIN_NAME -p udp --dport $DOCKER_PORT -j RETURN
+
+# 5. 豁免局域网目标地址（避免代理内网流量）
+iptables -t mangle -A $CHAIN_NAME -d 192.168.0.0/16 -j RETURN
+iptables -t mangle -A $CHAIN_NAME -d 10.0.0.0/8 -j RETURN
+iptables -t mangle -A $CHAIN_NAME -d 172.16.0.0/12 -j RETURN
+iptables -t mangle -A $CHAIN_NAME -d 255.255.255.255 -j RETURN
+
+# 6. TProxy 转发规则（最后匹配，作为默认规则）
+iptables -t mangle -A $CHAIN_NAME -p tcp -j TPROXY --on-port $TPROXY_PORT --tproxy-mark $TPROXY_MARK
+iptables -t mangle -A $CHAIN_NAME -p udp -j TPROXY --on-port $TPROXY_PORT --tproxy-mark $TPROXY_MARK
+
+log "✅ iptables TProxy 规则配置完成"
+
+# Hook 到 PREROUTING
+iptables -t mangle -I PREROUTING -j $CHAIN_NAME
+
+# 配置策略路由
+log "🛣️  正在配置策略路由..."
+if ip rule add fwmark $TPROXY_MARK table $TABLE_ID 2>&1; then
+    log "✅ 策略路由规则添加成功"
+else
+    log "❌ 错误：策略路由规则添加失败！"
+    exit 1
 fi
 
-# 3. 豁免宿主机常用端口（SSH 22, HTTP 80, HTTPS 443, Mihomo UI 9090等）
-iptables -t mangle -A \$CHAIN_NAME -p tcp --dport 22 -j RETURN    # SSH
-iptables -t mangle -A \$CHAIN_NAME -p tcp --dport 80 -j RETURN    # HTTP
-iptables -t mangle -A \$CHAIN_NAME -p tcp --dport 443 -j RETURN    # HTTPS
-iptables -t mangle -A \$CHAIN_NAME -p tcp --dport 9090 -j RETURN   # Mihomo UI
-iptables -t mangle -A \$CHAIN_NAME -p tcp --dport \$TPROXY_PORT -j RETURN  # TProxy 端口
-echo "[$(date '+%F %T')] ✅ 已豁免宿主机常用端口 (22, 80, 443, 9090, \$TPROXY_PORT)" | tee -a "\$LOG_FILE"
+if ip route add local default dev lo table $TABLE_ID 2>&1; then
+    log "✅ 路由表 $TABLE_ID 配置成功"
+else
+    log "❌ 错误：路由表 $TABLE_ID 配置失败！"
+    ip route del local default dev lo table $TABLE_ID 2>/dev/null || true
+    sleep 1
+    if ip route add local default dev lo table $TABLE_ID 2>&1; then
+        log "✅ 路由表 $TABLE_ID 配置成功（修复后）"
+    else
+        log "❌ 错误：路由表 $TABLE_ID 配置仍然失败！"
+        exit 1
+    fi
+fi
 
-# 4. 豁免 Docker 订阅端口 9277
-iptables -t mangle -A \$CHAIN_NAME -p tcp --dport \$DOCKER_PORT -j RETURN
-iptables -t mangle -A \$CHAIN_NAME -p udp --dport \$DOCKER_PORT -j RETURN
+log "✅ IPv4 TProxy 配置完成"
 
-# 5. 豁免本地回环（127.0.0.0/8，最常用）
-iptables -t mangle -A \$CHAIN_NAME -d 127.0.0.0/8 -j RETURN
-iptables -t mangle -A \$CHAIN_NAME -s 127.0.0.0/8 -j RETURN
+# ========================================
+# 配置验证
+# ========================================
+log "🔍 正在验证配置..."
 
-# 6. 豁免局域网网段（按使用频率排序：192.168 > 10.0 > 172.16）
-iptables -t mangle -A \$CHAIN_NAME -d 192.168.0.0/16 -j RETURN
-iptables -t mangle -A \$CHAIN_NAME -d 10.0.0.0/8 -j RETURN
-iptables -t mangle -A \$CHAIN_NAME -d 172.16.0.0/12 -j RETURN
+verify_config() {
+    local errors=0
+    
+    echo "=================================================="
+    echo "🔍 TProxy 配置验证报告"
+    echo "=================================================="
+    
+    # 1. 检查 Mihomo 服务
+    if command -v systemctl > /dev/null 2>&1; then
+        if systemctl is-active --quiet mihomo.service 2>/dev/null; then
+            echo "✅ Mihomo 服务运行正常"
+        else
+            echo "❌ Mihomo 服务未运行"
+            errors=$((errors + 1))
+        fi
+    elif command -v rc-service > /dev/null 2>&1; then
+        if rc-service mihomo status > /dev/null 2>&1; then
+            echo "✅ Mihomo 服务运行正常"
+        else
+            echo "❌ Mihomo 服务未运行"
+            errors=$((errors + 1))
+        fi
+    fi
+    
+    # 2. 检查 TProxy 端口监听
+    if command -v netstat > /dev/null 2>&1; then
+        if netstat -tuln 2>/dev/null | grep -q ":$TPROXY_PORT "; then
+            echo "✅ TProxy 端口 $TPROXY_PORT 正在监听"
+        else
+            echo "❌ TProxy 端口 $TPROXY_PORT 未监听"
+            errors=$((errors + 1))
+        fi
+    elif command -v ss > /dev/null 2>&1; then
+        if ss -tuln 2>/dev/null | grep -q ":$TPROXY_PORT "; then
+            echo "✅ TProxy 端口 $TPROXY_PORT 正在监听"
+        else
+            echo "❌ TProxy 端口 $TPROXY_PORT 未监听"
+            errors=$((errors + 1))
+        fi
+    fi
+    
+    # 3. 检查 iptables 规则
+    if iptables -t mangle -L $CHAIN_NAME -n 2>/dev/null | grep -q "TPROXY"; then
+        echo "✅ iptables TPROXY 规则已加载"
+        local rule_count=$(iptables -t mangle -L $CHAIN_NAME -n 2>/dev/null | grep -c "TPROXY" || echo 0)
+        echo "   (共 $rule_count 条 TPROXY 规则)"
+    else
+        echo "❌ iptables TPROXY 规则未找到"
+        errors=$((errors + 1))
+    fi
+    
+    # 4. 检查策略路由
+    if ip rule show | grep -q "$TPROXY_MARK"; then
+        echo "✅ 策略路由规则已配置 (mark: $TPROXY_MARK)"
+    else
+        echo "❌ 策略路由规则未找到"
+        errors=$((errors + 1))
+    fi
+    
+    if ip route show table $TABLE_ID 2>/dev/null | grep -q "local default"; then
+        echo "✅ 路由表 $TABLE_ID 已配置"
+    else
+        echo "❌ 路由表 $TABLE_ID 未配置"
+        errors=$((errors + 1))
+    fi
+    
+    # 5. 检查 IP 转发
+    if [ "$(cat /proc/sys/net/ipv4/ip_forward)" = "1" ]; then
+        echo "✅ IPv4 转发已启用"
+    else
+        echo "❌ IPv4 转发未启用"
+        errors=$((errors + 1))
+    fi
+    
+    echo "=================================================="
+    if [ $errors -eq 0 ]; then
+        echo "✅ 所有检查通过！TProxy 配置正常"
+        echo ""
+        echo "📱 客户端设备配置指南："
+        echo "   1. 设置网关: $MAIN_IP"
+        echo "   2. 设置 DNS: $MAIN_IP (或 8.8.8.8)"
+        echo ""
+        echo "🧪 测试命令（在客户端设备上执行）："
+        echo "   curl -I https://www.google.com"
+        echo "   curl https://ipinfo.io"
+        return 0
+    else
+        echo "❌ 发现 $errors 个问题，请检查日志"
+        echo ""
+        echo "📋 故障排除："
+        echo "   1. 查看日志: tail -f $LOG_FILE"
+        echo "   2. 检查 Mihomo: systemctl status mihomo 或 rc-service mihomo status"
+        echo "   3. 检查规则: iptables -t mangle -L $CHAIN_NAME -n -v"
+        echo "   4. 检查路由: ip rule show && ip route show table $TABLE_ID"
+        return 1
+    fi
+}
 
-# 7. 豁免广播地址
-iptables -t mangle -A \$CHAIN_NAME -d 255.255.255.255 -j RETURN
-
-# 8. 添加 TProxy 转发（最后匹配，作为默认规则）
-# 注意：mangle 表不支持 REJECT，如果需要阻止 UDP 443，应该在 filter 表中处理
-# 这里直接转发所有 TCP 和 UDP 流量到 TProxy
-iptables -t mangle -A \$CHAIN_NAME -p tcp -j TPROXY --on-port \$TPROXY_PORT --tproxy-mark \$TPROXY_MARK
-iptables -t mangle -A \$CHAIN_NAME -p udp -j TPROXY --on-port \$TPROXY_PORT --tproxy-mark \$TPROXY_MARK
-
-# 3. Hook 链 (!! 重点：跳转到我们的 *自定义链* !!)
-iptables -t mangle -I PREROUTING -j \$CHAIN_NAME
-
-# 4. 策略路由
-ip rule add fwmark \$TPROXY_MARK table \$TABLE_ID
-ip route add local default dev lo table \$TABLE_ID
-
-echo "[$(date '+%F %T')] ✅ IPv4 TProxy 规则加载完成 (链: \$CHAIN_NAME)" | tee -a "\$LOG_FILE"
+# 执行验证
+verify_config | tee -a "$LOG_FILE"
 EOF
 
 chmod +x "$TPROXY_SCRIPT"
@@ -329,10 +497,9 @@ echo "[$(date '+%F %T')] ✅ 写入转发脚本到 $TPROXY_SCRIPT" | tee -a "$LO
 if [ "$OS_DIST" == "alpine" ]; then
   # Alpine 使用 OpenRC
   echo "[$(date '+%F %T')] 🔧 正在创建 OpenRC 服务..." | tee -a "$LOG_FILE"
-  cat > "$SERVICE_FILE" <<EOF
+  cat > "$SERVICE_FILE" <<EOFRC
 #!/sbin/openrc-run
-# Sing-box IPv4 TProxy Redirect Service (Gateway Mode)
-description="Sing-box IPv4 TProxy Redirect Service"
+description="Sing-box IPv4 TProxy Service (Gateway Mode)"
 command="$TPROXY_SCRIPT"
 command_background="yes"
 pidfile="/run/\${RC_SVCNAME}.pid"
@@ -350,25 +517,15 @@ start() {
     ebegin "Starting TProxy service"
     
     # 1. 检查 mihomo 服务是否运行
-    if ! rc-service mihomo status >/dev/null 2>&1; then
+    if ! rc-service mihomo status > /dev/null 2>&1; then
         eend 1 "Mihomo service is not running. Please start mihomo first."
         return 1
     fi
     
     # 2. 等待网络就绪
-    sleep 3
+    sleep 2
     
-    # 3. 等待 mihomo 完全启动（延迟30秒）
-    ebegin "Waiting for mihomo to be ready (30s delay)..."
-    sleep 30
-    
-    # 4. 再次检查 mihomo 是否仍在运行
-    if ! rc-service mihomo status >/dev/null 2>&1; then
-        eend 1 "Mihomo service stopped. Aborting TProxy startup."
-        return 1
-    fi
-    
-    # 5. 执行配置脚本
+    # 3. 执行配置脚本（脚本内部会智能等待 Mihomo）
     if \$command; then
         eend 0
     else
@@ -379,10 +536,15 @@ start() {
 
 stop() {
     ebegin "Stopping TProxy service"
-    # TProxy 是 oneshot 类型，无需停止操作
+    # 清理规则
+    iptables -t mangle -D PREROUTING -j $CUSTOM_CHAIN 2>/dev/null || true
+    iptables -t mangle -F $CUSTOM_CHAIN 2>/dev/null || true
+    iptables -t mangle -X $CUSTOM_CHAIN 2>/dev/null || true
+    ip rule del fwmark $TPROXY_MARK table $TABLE_ID 2>/dev/null || true
+    ip route flush table $TABLE_ID 2>/dev/null || true
     eend 0
 }
-EOF
+EOFRC
   chmod +x "$SERVICE_FILE"
   echo "[$(date '+%F %T')] ✅ 已创建 OpenRC 服务文件: $SERVICE_FILE" | tee -a "$LOG_FILE"
   
@@ -392,7 +554,7 @@ EOF
   
   # 检查服务状态
   sleep 2
-  if rc-service tproxy status >/dev/null 2>&1; then
+  if rc-service tproxy status > /dev/null 2>&1; then
     echo "[$(date '+%F %T')] ✅ 已创建并成功启动 OpenRC 服务 tproxy" | tee -a "$LOG_FILE"
   else
     echo "[$(date '+%F %T')] ⚠️  服务 tproxy 可能未完全启动，请检查日志: /var/log/tproxy-service.log" | tee -a "$LOG_FILE"
@@ -401,9 +563,9 @@ EOF
 else
   # 其他系统使用 systemd
   echo "[$(date '+%F %T')] 🔧 正在创建 systemd 服务..." | tee -a "$LOG_FILE"
-  cat > "$SERVICE_FILE" <<EOF
+  cat > "$SERVICE_FILE" <<EOFSD
 [Unit]
-Description=Sing-box IPv4 TProxy Redirect Service (Gateway Mode)
+Description=Sing-box IPv4 TProxy Service (Gateway Mode)
 After=network-online.target mihomo.service
 Wants=network-online.target
 Requires=mihomo.service
@@ -413,15 +575,20 @@ Type=oneshot
 RemainAfterExit=yes
 # 检查 mihomo 是否运行
 ExecStartPre=/bin/bash -c 'systemctl is-active --quiet mihomo.service || exit 1'
-# 等待 mihomo 完全启动（延迟30秒）
-ExecStartPre=/bin/sleep 30
-# 再次检查 mihomo 是否仍在运行
-ExecStartPre=/bin/bash -c 'systemctl is-active --quiet mihomo.service || exit 1'
+# 执行配置脚本（脚本内部会智能等待 Mihomo）
 ExecStart=$TPROXY_SCRIPT
+StandardOutput=journal
+StandardError=journal
+# 停止时清理规则
+ExecStop=/bin/bash -c 'iptables -t mangle -D PREROUTING -j $CUSTOM_CHAIN 2>/dev/null || true'
+ExecStop=/bin/bash -c 'iptables -t mangle -F $CUSTOM_CHAIN 2>/dev/null || true'
+ExecStop=/bin/bash -c 'iptables -t mangle -X $CUSTOM_CHAIN 2>/dev/null || true'
+ExecStop=/bin/bash -c 'ip rule del fwmark $TPROXY_MARK table $TABLE_ID 2>/dev/null || true'
+ExecStop=/bin/bash -c 'ip route flush table $TABLE_ID 2>/dev/null || true'
 
 [Install]
 WantedBy=multi-user.target
-EOF
+EOFSD
 
   systemctl daemon-reload
   systemctl enable tproxy.service
@@ -440,7 +607,6 @@ fi
 # ---- 验证结果 ----
 echo "[$(date '+%F %T')] 🔍 当前 TProxy 状态:" | tee -a "$LOG_FILE"
 iptables -t mangle -L PREROUTING -v -n | tee -a "$LOG_FILE"
-# !! 修复点：验证我们正确的自定义链
 iptables -t mangle -L $CUSTOM_CHAIN -v -n | tee -a "$LOG_FILE"
 ip rule show | tee -a "$LOG_FILE"
 ip route show table 100 | tee -a "$LOG_FILE"
@@ -453,15 +619,9 @@ echo "  - 当前方案：iptables-legacy TPROXY"
 echo "  - 性能等级：中等（适合大多数场景 < 1Gbps）"
 echo "  - 规则已优化：常用规则优先匹配"
 echo ""
-echo "🔍 关于 nftables vs iptables-legacy："
-echo "  - nftables 在一般包过滤上性能更好（O(1) vs O(n)）"
-echo "  - 但在 TProxy 场景下，性能差异不明显"
-echo "  - iptables-legacy 对 TProxy 支持更成熟稳定"
-echo "  - Alpine 默认使用 iptables-legacy，无需切换"
-echo ""
 echo "💡 如需更高性能（> 1Gbps），推荐："
-echo "  - eBPF TC 模式（性能提升 2-5 倍，CPU 占用更低）"
-echo "  - 在 setup.sh 菜单选项 6 中选择模式 2"
+echo "  - eBPF TC 模式（性能提升 3-5 倍，CPU 占用更低）"
+echo "  - 使用 setup-ebpf-tc-tproxy.sh 脚本"
 echo "=================================================="
 echo ""
 echo "日志文件: $LOG_FILE 和 /var/log/tproxy.log"
@@ -469,15 +629,17 @@ if [ "$OS_DIST" == "alpine" ]; then
   echo "✅ 服务管理命令:"
   echo "   - 启动: rc-service tproxy start"
   echo "   - 停止: rc-service tproxy stop"
+  echo "   - 重启: rc-service tproxy restart"
   echo "   - 状态: rc-service tproxy status"
   echo "   - 日志: tail -f /var/log/tproxy-service.log"
 else
   echo "✅ 服务管理命令:"
   echo "   - 启动: systemctl start tproxy.service"
   echo "   - 停止: systemctl stop tproxy.service"
+  echo "   - 重启: systemctl restart tproxy.service"
   echo "   - 状态: systemctl status tproxy.service"
   echo "   - 日志: journalctl -u tproxy.service"
 fi
 echo ""
-echo "✅ 执行过程中遇到的任何问题都可以联系我。"
-echo "✅ 宿主机流量不会被代理。"
+echo "✅ 配置已自动验证，请查看上方验证报告"
+echo "✅ 客户端设备请设置网关为宿主机 IP"

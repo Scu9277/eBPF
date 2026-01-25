@@ -1,16 +1,17 @@
 #!/bin/bash
 # ==========================================
-# 🚀 eBPF TC TProxy 一键部署脚本 (高性能版)
+# 🚀 eBPF TC TProxy 一键部署脚本 (高性能优化版)
 # 
 # 作者: shangkouyou Duang Scu
 # 微信: shangkouyou
 # 邮箱: shangkouyou@gmail.com
-# 版本: v2.0 (Multi-OS Support & Optimized)
+# 版本: v2.1 (Gateway Mode Fixed \u0026 Smart Waiting)
 #
 # 支持系统: Debian, Ubuntu, CentOS, Alpine
 # 特性: 高性能 eBPF TC TProxy，比 iptables 性能提升 3-5 倍
 #
 # 更新日志:
+# - v2.1: 修复网关模式流量豁免逻辑，添加智能等待 Mihomo，完整验证
 # - v2.0: 完整多系统支持，高度优化，自动编译 eBPF 程序
 # ==========================================
 
@@ -18,13 +19,13 @@
 if [ -z "$BASH_VERSION" ]; then
     echo "⚠️  此脚本需要 bash 环境。正在尝试安装 bash..."
     if [ -f /etc/alpine-release ]; then
-        apk add --no-cache bash >/dev/null 2>&1
+        apk add --no-cache bash > /dev/null 2>&1
         exec bash "$0" "$@"
-    elif command -v apt-get >/dev/null 2>&1; then
-        apt-get update -y >/dev/null 2>&1 && apt-get install -y bash >/dev/null 2>&1
+    elif command -v apt-get > /dev/null 2>&1; then
+        apt-get update -y > /dev/null 2>&1 && apt-get install -y bash > /dev/null 2>&1
         exec bash "$0" "$@"
-    elif command -v yum >/dev/null 2>&1; then
-        yum install -y bash >/dev/null 2>&1
+    elif command -v yum > /dev/null 2>&1; then
+        yum install -y bash > /dev/null 2>&1
         exec bash "$0" "$@"
     else
         echo "❌ 请安装 bash 后再运行此脚本，或使用 'bash $0' 执行"
@@ -96,7 +97,7 @@ detect_os() {
         SERVICE_FILE="/etc/systemd/system/ebpf-tproxy.service"
     elif [ -f /etc/redhat-release ]; then
         OS_DIST="redhat"
-        if command -v dnf >/dev/null 2>&1; then
+        if command -v dnf > /dev/null 2>&1; then
             PKG_MANAGER="dnf"
             PKG_INSTALL="dnf install -y"
             PKG_UPDATE="dnf check-update -q || true"
@@ -153,18 +154,18 @@ install_dependencies() {
             if ! grep -q "^[^#].*community" /etc/apk/repositories 2>/dev/null; then
                 echo -e "${YELLOW}🔧 正在开启 community 仓库...${NC}"
                 sed -i 's|^#\(.*community\)|\1|g' /etc/apk/repositories 2>/dev/null || true
-                $PKG_UPDATE >/dev/null 2>&1
+                $PKG_UPDATE > /dev/null 2>&1
             fi
             
-            deps=("iproute2" "iproute2-tc" "bash" "curl" "wget" "grep" "awk" "sed")
+            deps=("iproute2" "iproute2-tc" "iptables" "bash" "curl" "wget" "grep" "awk" "sed")
             build_deps=("linux-headers" "gcc" "musl-dev" "clang" "llvm" "libbpf-dev" "make" "git")
             ;;
         debian)
-            deps=("iproute2" "curl" "wget" "grep" "awk" "sed" "jq")
+            deps=("iproute2" "curl" "wget" "grep" "awk" "sed" "jq" "net-tools")
             build_deps=("build-essential" "linux-headers-$(uname -r)" "clang" "llvm" "libbpf-dev" "libelf-dev" "zlib1g-dev" "make" "git" "pkg-config")
             ;;
         redhat)
-            deps=("iproute" "curl" "wget" "grep" "awk" "sed" "jq")
+            deps=("iproute" "curl" "wget" "grep" "awk" "sed" "jq" "net-tools")
             build_deps=("gcc" "make" "kernel-devel" "kernel-headers" "clang" "llvm" "libbpf-devel" "elfutils-libelf-devel" "zlib-devel" "git")
             ;;
     esac
@@ -175,28 +176,54 @@ install_dependencies() {
         local pkg_name="${dep%%:*}"
         local is_installed=false
         
-        # 检查命令是否存在
-        if command -v "$pkg_name" >/dev/null 2>&1; then
-            is_installed=true
+        # 特殊处理：iptables 命令检查
+        if [ "$pkg_name" = "iptables" ]; then
+            if command -v iptables > /dev/null 2>&1 || [ -x /sbin/iptables ] || [ -x /usr/sbin/iptables ]; then
+                is_installed=true
+            else
+                # 检查包是否安装
+                case "$OS_DIST" in
+                    alpine)
+                        if apk info -e "$pkg_name" > /dev/null 2>&1; then
+                            is_installed=true
+                        fi
+                        ;;
+                    debian)
+                        if dpkg -l | grep -q "^ii.*$pkg_name" 2>/dev/null; then
+                            is_installed=true
+                        fi
+                        ;;
+                    redhat)
+                        if rpm -q "$pkg_name" > /dev/null 2>&1; then
+                            is_installed=true
+                        fi
+                        ;;
+                esac
+            fi
         else
-            # 根据系统类型检查包管理器
-            case "$OS_DIST" in
-                alpine)
-                    if apk info -e "$pkg_name" >/dev/null 2>&1; then
-                        is_installed=true
-                    fi
-                    ;;
-                debian)
-                    if dpkg -l | grep -q "^ii.*$pkg_name" 2>/dev/null; then
-                        is_installed=true
-                    fi
-                    ;;
-                redhat)
-                    if rpm -q "$pkg_name" >/dev/null 2>&1; then
-                        is_installed=true
-                    fi
-                    ;;
-            esac
+            # 检查命令是否存在
+            if command -v "$pkg_name" > /dev/null 2>&1; then
+                is_installed=true
+            else
+                # 根据系统类型检查包管理器
+                case "$OS_DIST" in
+                    alpine)
+                        if apk info -e "$pkg_name" > /dev/null 2>&1; then
+                            is_installed=true
+                        fi
+                        ;;
+                    debian)
+                        if dpkg -l | grep -q "^ii.*$pkg_name" 2>/dev/null; then
+                            is_installed=true
+                        fi
+                        ;;
+                    redhat)
+                        if rpm -q "$pkg_name" > /dev/null 2>&1; then
+                            is_installed=true
+                        fi
+                        ;;
+                esac
+            fi
         fi
         
         if [ "$is_installed" = false ]; then
@@ -206,8 +233,8 @@ install_dependencies() {
     
     if [ ${#missing_deps[@]} -gt 0 ]; then
         echo -e "${YELLOW}📥 正在安装基础依赖: ${missing_deps[*]}...${NC}"
-        $PKG_UPDATE >/dev/null 2>&1
-        $PKG_INSTALL "${missing_deps[@]}" >/dev/null 2>&1
+        $PKG_UPDATE > /dev/null 2>&1
+        $PKG_INSTALL "${missing_deps[@]}" > /dev/null 2>&1
     fi
     
     # 检查编译工具
@@ -217,13 +244,13 @@ install_dependencies() {
         local is_installed=false
         
         # 检查命令是否存在
-        if command -v "$pkg_name" >/dev/null 2>&1; then
+        if command -v "$pkg_name" > /dev/null 2>&1; then
             is_installed=true
         else
             # 根据系统类型检查包管理器
             case "$OS_DIST" in
                 alpine)
-                    if apk info -e "$pkg_name" >/dev/null 2>&1; then
+                    if apk info -e "$pkg_name" > /dev/null 2>&1; then
                         is_installed=true
                     fi
                     ;;
@@ -233,7 +260,7 @@ install_dependencies() {
                     fi
                     ;;
                 redhat)
-                    if rpm -q "$pkg_name" >/dev/null 2>&1; then
+                    if rpm -q "$pkg_name" > /dev/null 2>&1; then
                         is_installed=true
                     fi
                     ;;
@@ -247,18 +274,25 @@ install_dependencies() {
     
     if [ ${#missing_build[@]} -gt 0 ]; then
         echo -e "${YELLOW}🔨 正在安装编译工具: ${missing_build[*]}...${NC}"
-        $PKG_UPDATE >/dev/null 2>&1
-        $PKG_INSTALL "${missing_build[@]}" >/dev/null 2>&1
+        $PKG_UPDATE > /dev/null 2>&1
+        $PKG_INSTALL "${missing_build[@]}" > /dev/null 2>&1
     fi
     
     # 验证关键工具
-    if ! command -v tc >/dev/null 2>&1; then
+    if ! command -v tc > /dev/null 2>&1; then
         echo -e "${RED}❌ 错误：无法安装 iproute2-tc，请手动安装后重试${NC}"
         exit 1
     fi
     
-    if ! command -v clang >/dev/null 2>&1; then
-        echo -e "${YELLOW}⚠️  警告：未找到 clang，将尝试使用预编译的 eBPF 程序${NC}"
+    # 验证 iptables
+    if ! command -v iptables > /dev/null 2>&1 && [ ! -x /sbin/iptables ] && [ ! -x /usr/sbin/iptables ]; then
+        echo -e "${RED}❌ 错误：无法找到 iptables 命令！请确保已安装 iptables${NC}"
+        echo -e "${YELLOW}   尝试安装: $PKG_INSTALL iptables${NC}"
+        exit 1
+    fi
+    
+    if ! command -v clang > /dev/null 2>&1; then
+        echo -e "${YELLOW}⚠️  警告：未找到 clang，将使用优化的 iptables 方案${NC}"
     fi
     
     echo -e "${GREEN}✅ 依赖检查完成${NC}"
@@ -277,7 +311,7 @@ detect_interface() {
     fi
     
     # 方法3: 通过 ifconfig (备用)
-    if [ -z "$MAIN_INTERFACE" ] && command -v ifconfig >/dev/null 2>&1; then
+    if [ -z "$MAIN_INTERFACE" ] && command -v ifconfig > /dev/null 2>&1; then
         MAIN_INTERFACE=$(ifconfig 2>/dev/null | grep -E '^[a-z]' | grep -v 'lo:' | head -n1 | cut -d: -f1)
     fi
     
@@ -335,7 +369,7 @@ compile_ebpf() {
     fi
     
     # 检查是否有 clang
-    if ! command -v clang >/dev/null 2>&1; then
+    if ! command -v clang > /dev/null 2>&1; then
         echo -e "${YELLOW}⚠️  未找到 clang，将使用优化版 iptables 方案${NC}"
         USE_EBPF=false
         return 1
@@ -344,25 +378,26 @@ compile_ebpf() {
     echo -e "${YELLOW}🔨 正在编译 eBPF 程序...${NC}"
     
     # 将 mark 值转换为十进制用于 eBPF 代码
-    # bash 的 $((0x23B3)) 可以正确转换为十进制
     local mark_decimal=$((TPROXY_MARK))
     echo -e "${YELLOW}   使用 mark 值: $TPROXY_MARK (十进制: $mark_decimal)${NC}"
     
-    # 简化版 eBPF 程序（仅标记，实际重定向由 TC 完成）
     # 获取宿主机 IP 的十六进制表示（用于 eBPF 程序）
     local host_ip_hex=""
     if [ -n "$MAIN_INTERFACE" ]; then
         local host_ip=$(ip -4 addr show "$MAIN_INTERFACE" 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d/ -f1 | head -n1)
         if [ -n "$host_ip" ]; then
-            # 将 IP 地址转换为十六进制（例如 10.0.0.99 -> 0x0a000063）
+            # 将 IP 地址转换为网络字节序十六进制（小端序）
             local ip_parts=($(echo "$host_ip" | tr '.' ' '))
             if [ ${#ip_parts[@]} -eq 4 ]; then
-                host_ip_hex=$(printf "0x%02x%02x%02x%02x" ${ip_parts[0]} ${ip_parts[1]} ${ip_parts[2]} ${ip_parts[3]})
+                # 网络字节序是大端序，但在 x86 上需要按小端序存储
+                # 例如 10.0.0.99 -> 0x6300000a (小端序)
+                host_ip_hex=$(printf "0x%02x%02x%02x%02x" ${ip_parts[3]} ${ip_parts[2]} ${ip_parts[1]} ${ip_parts[0]})
+                echo -e "${YELLOW}   宿主机 IP: $host_ip (hex: $host_ip_hex)${NC}"
             fi
         fi
     fi
     
-    cat > "$ebpf_source" <<EOFBPF
+    cat > "$ebpf_source" <<'EOFBPF'
 #include <linux/bpf.h>
 #include <linux/pkt_cls.h>
 #include <linux/in.h>
@@ -376,8 +411,15 @@ compile_ebpf() {
 #define TC_ACT_OK 0
 #endif
 
-#define TPROXY_MARK $mark_decimal
-$(if [ -n "$host_ip_hex" ]; then echo "#define HOST_IP $host_ip_hex"; fi)
+EOFBPF
+
+    # 添加动态定义
+    echo "#define TPROXY_MARK $mark_decimal" >> "$ebpf_source"
+    if [ -n "$host_ip_hex" ]; then
+        echo "#define HOST_IP $host_ip_hex" >> "$ebpf_source"
+    fi
+    
+    cat >> "$ebpf_source" <<'EOFBPF'
 
 SEC("tc")
 int tproxy_mark(struct __sk_buff *skb) {
@@ -391,21 +433,33 @@ int tproxy_mark(struct __sk_buff *skb) {
     __be32 saddr = ip->saddr;
     __be32 daddr = ip->daddr;
     
-    // ⚠️ 重要：豁免宿主机自己发出的流量（源地址是宿主机 IP）
-$(if [ -n "$host_ip_hex" ]; then echo "    if (saddr == HOST_IP)
-        return TC_ACT_OK;"; fi)
+    // ⚠️ 关键修复：只豁免宿主机自己发出的流量（源地址是宿主机 IP）
+    // 不豁免发往宿主机的流量，因为那些是需要转发的客户端流量
+#ifdef HOST_IP
+    if (saddr == HOST_IP) {
+        // 宿主机自己发出的流量，不代理
+        return TC_ACT_OK;
+    }
+#endif
     
     // 跳过本地回环
-    if (saddr == 0x0100007f || daddr == 0x0100007f) // 127.0.0.1
+    if ((saddr & 0x000000ff) == 0x0000007f || (daddr & 0x000000ff) == 0x0000007f) // 127.x.x.x
         return TC_ACT_OK;
     
-    // 跳过局域网目标地址（但允许宿主机发出的流量到外网）
-    if ((daddr & 0xff000000) == 0x0a000000 || // 10.0.0.0/8
-        (daddr & 0xff000000) == 0xc0a80000 || // 192.168.0.0/16
-        (daddr & 0xfff00000) == 0xac100000)   // 172.16.0.0/12
+    // 跳过局域网目标地址（避免代理内网流量）
+    // 注意：这里只检查目标地址，不检查源地址
+    // 10.0.0.0/8
+    if ((daddr & 0x000000ff) == 0x0000000a)
+        return TC_ACT_OK;
+    // 192.168.0.0/16
+    if ((daddr & 0x0000ffff) == 0x0000a8c0)
+        return TC_ACT_OK;
+    // 172.16.0.0/12
+    if ((daddr & 0x0000f0ff) == 0x000010ac)
         return TC_ACT_OK;
     
-    // 标记数据包（只标记从其他设备发来的流量，不标记宿主机自己的流量）
+    // 标记数据包（只标记从其他设备发来的、发往外网的流量）
+    // 在 ingress 阶段，这些数据包是从客户端设备发来的，需要转发到 mihomo
     skb->mark = TPROXY_MARK;
     
     return TC_ACT_OK;
@@ -461,11 +515,15 @@ create_tproxy_script() {
         use_ebpf_flag="true"
     fi
     
-    cat > "$EBPF_SCRIPT" <<EOF
+    cat > "$EBPF_SCRIPT" <<'EOF'
 #!/bin/bash
-# eBPF TC TProxy 配置脚本
-# 高性能透明代理，使用 eBPF TC 实现
+# eBPF TC TProxy 配置脚本 (优化版)
+# 高性能透明代理，修复网关模式流量豁免逻辑
 
+EOF
+
+    # 添加配置变量
+    cat >> "$EBPF_SCRIPT" <<EOF
 LOG_FILE="/var/log/ebpf-tproxy.log"
 TPROXY_PORT=$TPROXY_PORT
 TPROXY_MARK=$TPROXY_MARK
@@ -475,70 +533,118 @@ MAIN_IF="$MAIN_INTERFACE"
 EBPF_OBJECT="$EBPF_DIR/tproxy.bpf.o"
 USE_EBPF="$use_ebpf_flag"
 
-# 查找 iptables 命令的完整路径（确保在脚本中可用）
-# Alpine 系统中 iptables 通常在 /sbin/iptables
-IPTABLES_CMD=\$(command -v iptables 2>/dev/null)
-if [ -z "\$IPTABLES_CMD" ] || [ ! -x "\$IPTABLES_CMD" ]; then
-    # 尝试常见路径
+EOF
+
+    # 添加脚本主体
+    cat >> "$EBPF_SCRIPT" <<'EOF'
+log() {
+    echo "[$(date '+%F %T')] $1" | tee -a "$LOG_FILE"
+}
+
+# 智能等待 Mihomo 启动函数
+wait_for_mihomo() {
+    local max_wait=60
+    local waited=0
+    local check_interval=2
+    
+    log "⏳ 正在等待 Mihomo 服务就绪..."
+    
+    while [ $waited -lt $max_wait ]; do
+        # 检查服务状态
+        local service_running=false
+        if command -v systemctl > /dev/null 2>&1; then
+            if systemctl is-active --quiet mihomo.service 2>/dev/null; then
+                service_running=true
+            fi
+        elif command -v rc-service > /dev/null 2>&1; then
+            if rc-service mihomo status > /dev/null 2>&1; then
+                service_running=true
+            fi
+        fi
+        
+        if [ "$service_running" = true ]; then
+            # 服务运行中，检查端口是否监听
+            sleep 2  # 等待端口完全启动
+            
+            if command -v netstat > /dev/null 2>&1; then
+                if netstat -tuln 2>/dev/null | grep -q ":$TPROXY_PORT "; then
+                    log "✅ Mihomo 服务已就绪 (等待时间: ${waited}s)"
+                    return 0
+                fi
+            elif command -v ss > /dev/null 2>&1; then
+                if ss -tuln 2>/dev/null | grep -q ":$TPROXY_PORT "; then
+                    log "✅ Mihomo 服务已就绪 (等待时间: ${waited}s)"
+                    return 0
+                fi
+            else
+                # 没有 netstat 或 ss，只能依赖服务状态
+                log "✅ Mihomo 服务已启动 (等待时间: ${waited}s)"
+                return 0
+            fi
+        fi
+        
+        sleep $check_interval
+        waited=$((waited + check_interval))
+        
+        if [ $((waited % 10)) -eq 0 ]; then
+            log "   仍在等待 Mihomo... (已等待 ${waited}s)"
+        fi
+    done
+    
+    log "❌ 等待 Mihomo 超时 (${max_wait}s)"
+    return 1
+}
+
+# 查找 iptables 命令的完整路径
+log "🔍 正在查找 iptables 命令..."
+IPTABLES_CMD=$(command -v iptables 2>/dev/null)
+if [ -z "$IPTABLES_CMD" ] || [ ! -x "$IPTABLES_CMD" ]; then
     for path in /sbin/iptables /usr/sbin/iptables /usr/local/sbin/iptables; do
-        if [ -x "\$path" ]; then
-            IPTABLES_CMD="\$path"
+        if [ -x "$path" ]; then
+            IPTABLES_CMD="$path"
             break
         fi
     done
-    if [ -z "\$IPTABLES_CMD" ] || [ ! -x "\$IPTABLES_CMD" ]; then
+    if [ -z "$IPTABLES_CMD" ] || [ ! -x "$IPTABLES_CMD" ]; then
         log "❌ 错误：无法找到 iptables 命令！"
         exit 1
     fi
 fi
-log "✅ 使用 iptables 路径: \$IPTABLES_CMD"
-
-log() {
-    echo "[$(date '+%F %T')] \$1" | tee -a "\$LOG_FILE"
-}
+log "✅ 使用 iptables 路径: $IPTABLES_CMD"
 
 log "🚀 开始配置 eBPF TC TProxy..."
 
-# ⚠️ 重要：检查 mihomo 是否运行
-log "🔍 正在检查 mihomo 服务状态..."
-if command -v systemctl >/dev/null 2>&1; then
-    if ! systemctl is-active --quiet mihomo.service 2>/dev/null; then
-        log "❌ 错误：mihomo 服务未运行！请先启动 mihomo 服务"
-        exit 1
-    fi
-elif command -v rc-service >/dev/null 2>&1; then
-    if ! rc-service mihomo status >/dev/null 2>&1; then
-        log "❌ 错误：mihomo 服务未运行！请先启动 mihomo 服务"
-        exit 1
-    fi
+# ⚠️ 智能等待 Mihomo 启动
+if ! wait_for_mihomo; then
+    log "❌ Mihomo 服务未就绪，无法继续配置 TProxy"
+    exit 1
 fi
-log "✅ mihomo 服务正在运行"
 
-# 加载必要的内核模块（TProxy 必需）
+# 加载必要的内核模块
 log "📦 正在加载内核模块..."
 for mod in xt_TPROXY nf_tproxy_ipv4; do
-    modprobe \$mod 2>/dev/null && log "✅ 加载模块: \$mod" || log "⚠️  模块 \$mod 可能已加载或不可用"
+    modprobe $mod 2>/dev/null && log "✅ 加载模块: $mod" || log "⚠️  模块 $mod 可能已加载或不可用"
 done
 
-# 启用 IP 转发（必需）
-sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1
+# 启用 IP 转发
+sysctl -w net.ipv4.ip_forward=1 > /dev/null 2>&1
 if ! grep -q '^net.ipv4.ip_forward' /etc/sysctl.conf 2>/dev/null; then
     echo "net.ipv4.ip_forward = 1" >> /etc/sysctl.conf
 fi
 
 # 检测主网卡 IP
-MAIN_IP=\$(ip -4 addr show "\$MAIN_IF" 2>/dev/null | grep 'inet ' | awk '{print \$2}' | cut -d/ -f1 | head -n1)
-if [ -n "\$MAIN_IP" ]; then
-    log "✅ 检测到主网卡: \$MAIN_IF (\$MAIN_IP)"
+MAIN_IP=$(ip -4 addr show "$MAIN_IF" 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d/ -f1 | head -n1)
+if [ -n "$MAIN_IP" ]; then
+    log "✅ 检测到主网卡: $MAIN_IF ($MAIN_IP)"
 else
     log "⚠️  未能检测到主网卡 IP"
 fi
 
 # 清理旧的 TC 规则
 log "🧹 正在清理旧的 TC 规则..."
-tc qdisc del dev "\$MAIN_IF" clsact 2>/dev/null || true
-tc filter del dev "\$MAIN_IF" ingress 2>/dev/null || true
-tc filter del dev "\$MAIN_IF" egress 2>/dev/null || true
+tc qdisc del dev "$MAIN_IF" clsact 2>/dev/null || true
+tc filter del dev "$MAIN_IF" ingress 2>/dev/null || true
+tc filter del dev "$MAIN_IF" egress 2>/dev/null || true
 
 # 卸载旧的 eBPF 程序
 if [ -f /sys/fs/bpf/tproxy_prog ]; then
@@ -547,13 +653,13 @@ fi
 
 # 创建 clsact qdisc
 log "📦 正在创建 clsact qdisc..."
-tc qdisc add dev "\$MAIN_IF" clsact || {
+tc qdisc add dev "$MAIN_IF" clsact || {
     log "❌ 创建 clsact qdisc 失败"
     exit 1
 }
 
 # 加载 eBPF 程序（如果启用且存在）
-if [ "\$USE_EBPF" = "true" ] && [ -f "\$EBPF_OBJECT" ]; then
+if [ "$USE_EBPF" = "true" ] && [ -f "$EBPF_OBJECT" ]; then
     log "🔌 正在加载 eBPF 程序..."
     # 挂载 bpffs（如果未挂载）
     if ! mountpoint -q /sys/fs/bpf 2>/dev/null; then
@@ -561,7 +667,7 @@ if [ "\$USE_EBPF" = "true" ] && [ -f "\$EBPF_OBJECT" ]; then
     fi
     
     # 使用 tc 加载 eBPF 程序
-    if tc filter add dev "\$MAIN_IF" ingress bpf direct-action obj "\$EBPF_OBJECT" sec tc 2>/dev/null; then
+    if tc filter add dev "$MAIN_IF" ingress bpf direct-action obj "$EBPF_OBJECT" sec tc 2>/dev/null; then
         log "✅ eBPF 程序加载成功"
         USE_EBPF=true
     else
@@ -573,137 +679,91 @@ else
     USE_EBPF=false
 fi
 
-# ⚠️ 重要：无论使用 eBPF 还是 iptables，都需要配置 iptables TPROXY 规则
-# eBPF 程序只负责标记数据包，实际重定向由 iptables TPROXY 完成
+# ⚠️ 配置 iptables TProxy 规则（修复网关模式）
 log "🔗 配置 iptables TProxy 规则..."
 
 # 清理旧规则
-\$IPTABLES_CMD -t mangle -D PREROUTING -j TPROXY_CHAIN 2>/dev/null || true
-\$IPTABLES_CMD -t mangle -F TPROXY_CHAIN 2>/dev/null || true
-\$IPTABLES_CMD -t mangle -X TPROXY_CHAIN 2>/dev/null || true
+$IPTABLES_CMD -t mangle -D PREROUTING -j TPROXY_CHAIN 2>/dev/null || true
+$IPTABLES_CMD -t mangle -F TPROXY_CHAIN 2>/dev/null || true
+$IPTABLES_CMD -t mangle -X TPROXY_CHAIN 2>/dev/null || true
 
 # 创建新链
-\$IPTABLES_CMD -t mangle -N TPROXY_CHAIN 2>/dev/null || true
+$IPTABLES_CMD -t mangle -N TPROXY_CHAIN 2>/dev/null || true
 
-# ⚠️ 重要：即使使用 eBPF，也要在 iptables 中添加豁免规则，确保宿主机流量不被拦截
-# 如果使用 eBPF，只需要处理已标记的数据包（eBPF 已经处理了豁免规则）
-# 如果使用 iptables，需要完整的规则链（包含豁免规则）
-if [ "\$USE_EBPF" = "true" ]; then
-    # eBPF 模式：添加豁免规则 + 处理已标记的数据包
-    # ⚠️ 重要：优先豁免宿主机流量，确保宿主机网络不受影响
-    
-    # 1. 豁免宿主机发出的流量（源地址是宿主机 IP）- 最高优先级
-    if [ -n "\$MAIN_IP" ]; then
-        \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -s \$MAIN_IP -j RETURN
-        log "✅ 已豁免宿主机发出的流量 (源: \$MAIN_IP)"
-    fi
-    
-    # 2. 豁免发往宿主机的流量（目标地址是宿主机 IP）- 放行入站流量转发
-    if [ -n "\$MAIN_IP" ]; then
-        \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -d \$MAIN_IP -j RETURN
-        log "✅ 已豁免发往宿主机的流量 (目标: \$MAIN_IP)"
-    fi
-    
-    # 3. 豁免宿主机常用端口（SSH 22, HTTP 80, HTTPS 443, Mihomo UI 9090等）
-    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp --dport 22 -j RETURN    # SSH
-    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp --dport 80 -j RETURN    # HTTP
-    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp --dport 443 -j RETURN   # HTTPS
-    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp --dport 9090 -j RETURN  # Mihomo UI
-    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp --dport \$TPROXY_PORT -j RETURN  # TProxy 端口
-    log "✅ 已豁免宿主机常用端口 (22, 80, 443, 9090, \$TPROXY_PORT)"
-    
-    # 4. 豁免本地回环
-    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -d 127.0.0.0/8 -j RETURN
-    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -s 127.0.0.0/8 -j RETURN
-    
-    # 5. 豁免局域网（但允许转发到外网）
-    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -d 192.168.0.0/16 -j RETURN
-    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -d 10.0.0.0/8 -j RETURN
-    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -d 172.16.0.0/12 -j RETURN
-    
-    # 6. 豁免 Docker 端口
-    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp --dport \$DOCKER_PORT -j RETURN
-    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p udp --dport \$DOCKER_PORT -j RETURN
-    
-    # 7. 处理已标记的数据包（eBPF 标记的）- 只处理从其他设备发来的流量
-    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -m mark --mark \$TPROXY_MARK -p tcp -j TPROXY --on-port \$TPROXY_PORT --tproxy-mark \$TPROXY_MARK
-    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -m mark --mark \$TPROXY_MARK -p udp -j TPROXY --on-port \$TPROXY_PORT --tproxy-mark \$TPROXY_MARK
-    log "✅ eBPF + iptables TProxy 规则配置完成（包含完整的宿主机豁免规则）"
-else
-    # iptables 模式：完整的规则链（包含豁免规则）
-    # ⚠️ 重要：优化规则顺序，优先豁免宿主机流量
-    
-    # 1. 豁免宿主机发出的流量（源地址是宿主机 IP）- 最高优先级
-    if [ -n "\$MAIN_IP" ]; then
-        \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -s \$MAIN_IP -j RETURN
-        log "✅ 已豁免宿主机发出的流量 (源: \$MAIN_IP)"
-    fi
-    
-    # 2. 豁免发往宿主机的流量（目标地址是宿主机 IP）- 放行入站流量转发
-    if [ -n "\$MAIN_IP" ]; then
-        \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -d \$MAIN_IP -j RETURN
-        log "✅ 已豁免发往宿主机的流量 (目标: \$MAIN_IP)"
-    fi
-    
-    # 3. 豁免宿主机常用端口（SSH 22, HTTP 80, HTTPS 443, Mihomo UI 9090等）
-    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp --dport 22 -j RETURN    # SSH
-    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp --dport 80 -j RETURN    # HTTP
-    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp --dport 443 -j RETURN   # HTTPS
-    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp --dport 9090 -j RETURN  # Mihomo UI
-    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp --dport \$TPROXY_PORT -j RETURN  # TProxy 端口
-    log "✅ 已豁免宿主机常用端口 (22, 80, 443, 9090, \$TPROXY_PORT)"
-    
-    # 4. 豁免 Docker 订阅端口
-    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp --dport \$DOCKER_PORT -j RETURN
-    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p udp --dport \$DOCKER_PORT -j RETURN
-    
-    # 5. 豁免本地回环（127.0.0.0/8，最常用）
-    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -d 127.0.0.0/8 -j RETURN
-    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -s 127.0.0.0/8 -j RETURN
-    
-    # 6. 豁免局域网网段（按使用频率排序）
-    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -d 192.168.0.0/16 -j RETURN
-    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -d 10.0.0.0/8 -j RETURN
-    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -d 172.16.0.0/12 -j RETURN
-    
-    # 7. 豁免广播地址
-    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -d 255.255.255.255 -j RETURN
-    
-    # 8. TProxy 转发规则（最后匹配，作为默认规则）
-    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp -j TPROXY --on-port \$TPROXY_PORT --tproxy-mark \$TPROXY_MARK
-    \$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p udp -j TPROXY --on-port \$TPROXY_PORT --tproxy-mark \$TPROXY_MARK
-    log "✅ iptables TProxy 规则配置完成（包含完整的宿主机豁免规则）"
+# ⚠️ 关键修复：优化规则顺序，正确处理网关模式
+# 规则优先级：本地回环 > 宿主机自身流量 > 服务端口 > 局域网 > TProxy
+
+# 1. 豁免本地回环（最高优先级）
+$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -d 127.0.0.0/8 -j RETURN
+$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -s 127.0.0.0/8 -j RETURN
+
+# 2. ⚠️ 关键：只豁免宿主机自己发出的流量（源地址是宿主机 IP）
+#    不豁免发往宿主机的流量，因为客户端流量的目标是外网，不是宿主机
+if [ -n "$MAIN_IP" ]; then
+    $IPTABLES_CMD -t mangle -A TPROXY_CHAIN -s $MAIN_IP -j RETURN
+    log "✅ 已豁免宿主机发出的流量 (源: $MAIN_IP)"
 fi
 
-# Hook 到 PREROUTING（无论使用 eBPF 还是 iptables）
-\$IPTABLES_CMD -t mangle -I PREROUTING -j TPROXY_CHAIN
+# 3. 豁免宿主机服务端口（基于目标端口）
+$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp --dport 22 -j RETURN    # SSH
+$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp --dport 80 -j RETURN    # HTTP
+$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp --dport 443 -j RETURN   # HTTPS
+$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp --dport 9090 -j RETURN  # Mihomo UI
+$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp --dport $TPROXY_PORT -j RETURN  # TProxy 端口
+log "✅ 已豁免宿主机服务端口 (22, 80, 443, 9090, $TPROXY_PORT)"
+
+# 4. 豁免 Docker 端口
+$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp --dport $DOCKER_PORT -j RETURN
+$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p udp --dport $DOCKER_PORT -j RETURN
+
+# 5. 豁免局域网目标地址（避免代理内网流量）
+$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -d 192.168.0.0/16 -j RETURN
+$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -d 10.0.0.0/8 -j RETURN
+$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -d 172.16.0.0/12 -j RETURN
+$IPTABLES_CMD -t mangle -A TPROXY_CHAIN -d 255.255.255.255 -j RETURN
+
+# 6. TProxy 转发规则（最后匹配）
+if [ "$USE_EBPF" = "true" ]; then
+    # eBPF 模式：只处理已标记的数据包
+    $IPTABLES_CMD -t mangle -A TPROXY_CHAIN -m mark --mark $TPROXY_MARK -p tcp -j TPROXY --on-port $TPROXY_PORT --tproxy-mark $TPROXY_MARK
+    $IPTABLES_CMD -t mangle -A TPROXY_CHAIN -m mark --mark $TPROXY_MARK -p udp -j TPROXY --on-port $TPROXY_PORT --tproxy-mark $TPROXY_MARK
+    log "✅ eBPF + iptables TProxy 规则配置完成"
+else
+    # iptables 模式：处理所有未豁免的流量
+    $IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p tcp -j TPROXY --on-port $TPROXY_PORT --tproxy-mark $TPROXY_MARK
+    $IPTABLES_CMD -t mangle -A TPROXY_CHAIN -p udp -j TPROXY --on-port $TPROXY_PORT --tproxy-mark $TPROXY_MARK
+    log "✅ iptables TProxy 规则配置完成"
+fi
+
+# Hook 到 PREROUTING
+$IPTABLES_CMD -t mangle -I PREROUTING -j TPROXY_CHAIN
 
 # 配置策略路由
 log "🛣️  正在配置策略路由..."
 # 清理旧规则
-ip rule del fwmark \$TPROXY_MARK table \$TABLE_ID 2>/dev/null || true
-ip route flush table \$TABLE_ID 2>/dev/null || true
+ip rule del fwmark $TPROXY_MARK table $TABLE_ID 2>/dev/null || true
+ip route flush table $TABLE_ID 2>/dev/null || true
 
-# 添加策略路由规则（带错误检查）
-if ip rule add fwmark \$TPROXY_MARK table \$TABLE_ID 2>&1; then
+# 添加策略路由规则
+if ip rule add fwmark $TPROXY_MARK table $TABLE_ID 2>&1; then
     log "✅ 策略路由规则添加成功"
 else
     log "❌ 错误：策略路由规则添加失败！"
     exit 1
 fi
 
-# 添加路由表条目（带错误检查）
-if ip route add local default dev lo table \$TABLE_ID 2>&1; then
-    log "✅ 路由表 \$TABLE_ID 配置成功"
+# 添加路由表条目
+if ip route add local default dev lo table $TABLE_ID 2>&1; then
+    log "✅ 路由表 $TABLE_ID 配置成功"
 else
-    log "❌ 错误：路由表 \$TABLE_ID 配置失败！"
-    # 尝试修复：先删除可能存在的冲突路由
-    ip route del local default dev lo table \$TABLE_ID 2>/dev/null || true
+    log "❌ 错误：路由表 $TABLE_ID 配置失败！"
+    # 尝试修复
+    ip route del local default dev lo table $TABLE_ID 2>/dev/null || true
     sleep 1
-    if ip route add local default dev lo table \$TABLE_ID 2>&1; then
-        log "✅ 路由表 \$TABLE_ID 配置成功（修复后）"
+    if ip route add local default dev lo table $TABLE_ID 2>&1; then
+        log "✅ 路由表 $TABLE_ID 配置成功（修复后）"
     else
-        log "❌ 错误：路由表 \$TABLE_ID 配置仍然失败！"
+        log "❌ 错误：路由表 $TABLE_ID 配置仍然失败！"
         exit 1
     fi
 fi
@@ -712,10 +772,10 @@ log "✅ 策略路由配置完成"
 
 # 性能优化：调整内核参数
 log "⚡ 正在优化内核参数..."
-sysctl -w net.core.rmem_max=134217728 >/dev/null 2>&1
-sysctl -w net.core.wmem_max=134217728 >/dev/null 2>&1
-sysctl -w net.ipv4.tcp_rmem="4096 87380 134217728" >/dev/null 2>&1
-sysctl -w net.ipv4.tcp_wmem="4096 65536 134217728" >/dev/null 2>&1
+sysctl -w net.core.rmem_max=134217728 > /dev/null 2>&1
+sysctl -w net.core.wmem_max=134217728 > /dev/null 2>&1
+sysctl -w net.ipv4.tcp_rmem="4096 87380 134217728" > /dev/null 2>&1
+sysctl -w net.ipv4.tcp_wmem="4096 65536 134217728" > /dev/null 2>&1
 
 # 持久化优化参数
 if ! grep -q '^net.core.rmem_max' /etc/sysctl.conf 2>/dev/null; then
@@ -731,62 +791,130 @@ fi
 
 log "✅ eBPF TC TProxy 配置完成"
 
-# 验证配置
+# ========================================
+# 配置验证
+# ========================================
 log "🔍 正在验证配置..."
-if [ "\$USE_EBPF" = "true" ]; then
-    if tc filter show dev "\$MAIN_IF" ingress 2>/dev/null | grep -q "bpf"; then
-        log "✅ eBPF 程序已成功加载"
-    else
-        log "⚠️  eBPF 程序可能未正确加载"
-    fi
-else
-    if \$IPTABLES_CMD -t mangle -L TPROXY_CHAIN >/dev/null 2>&1; then
-        log "✅ iptables TPROXY_CHAIN 规则已创建"
-        if \$IPTABLES_CMD -t mangle -L PREROUTING -n | grep -q "TPROXY_CHAIN"; then
-            log "✅ iptables PREROUTING 跳转规则已配置"
+
+verify_config() {
+    local errors=0
+    
+    echo "=================================================="
+    echo "🔍 TProxy 配置验证报告"
+    echo "=================================================="
+    
+    # 1. 检查 Mihomo 服务
+    if command -v systemctl > /dev/null 2>&1; then
+        if systemctl is-active --quiet mihomo.service 2>/dev/null; then
+            echo "✅ Mihomo 服务运行正常"
         else
-            log "❌ 警告：iptables PREROUTING 跳转规则未找到！"
+            echo "❌ Mihomo 服务未运行"
+            errors=$((errors + 1))
         fi
-    else
-        log "❌ 错误：iptables TPROXY_CHAIN 规则创建失败！"
-    fi
-fi
-
-# 验证策略路由（正确解析 ip rule show 输出）
-# ip rule show 输出格式: "32765:  from all fwmark 0x23b3 lookup 100"
-rule_check=\$(ip rule show | grep -i "fwmark" | grep -i "\$TPROXY_MARK")
-if [ -n "\$rule_check" ]; then
-    log "✅ 策略路由规则已配置 (mark: \$TPROXY_MARK)"
-else
-    log "❌ 错误：策略路由规则未找到！"
-    log "   期望的 mark: \$TPROXY_MARK"
-    current_rules=\$(ip rule show | grep -i "fwmark" || echo "无")
-    log "   当前规则: \$current_rules"
-    # 尝试重新添加
-    log "   尝试重新添加策略路由规则..."
-    ip rule del fwmark \$TPROXY_MARK table \$TABLE_ID 2>/dev/null || true
-    sleep 1
-    if ip rule add fwmark \$TPROXY_MARK table \$TABLE_ID 2>&1; then
-        log "   ✅ 策略路由规则重新添加成功"
-        # 再次验证
-        sleep 1
-        if ip rule show | grep -i "fwmark" | grep -i "\$TPROXY_MARK" >/dev/null 2>&1; then
-            log "   ✅ 策略路由规则验证成功"
+    elif command -v rc-service > /dev/null 2>&1; then
+        if rc-service mihomo status > /dev/null 2>&1; then
+            echo "✅ Mihomo 服务运行正常"
         else
-            log "   ⚠️  策略路由规则添加成功但验证失败，可能需要重启服务"
+            echo "❌ Mihomo 服务未运行"
+            errors=$((errors + 1))
         fi
-    else
-        log "   ❌ 策略路由规则重新添加失败"
     fi
-fi
+    
+    # 2. 检查 TProxy 端口监听
+    if command -v netstat > /dev/null 2>&1; then
+        if netstat -tuln 2>/dev/null | grep -q ":$TPROXY_PORT "; then
+            echo "✅ TProxy 端口 $TPROXY_PORT 正在监听"
+        else
+            echo "❌ TProxy 端口 $TPROXY_PORT 未监听"
+            errors=$((errors + 1))
+        fi
+    elif command -v ss > /dev/null 2>&1; then
+        if ss -tuln 2>/dev/null | grep -q ":$TPROXY_PORT "; then
+            echo "✅ TProxy 端口 $TPROXY_PORT 正在监听"
+        else
+            echo "❌ TProxy 端口 $TPROXY_PORT 未监听"
+            errors=$((errors + 1))
+        fi
+    fi
+    
+    # 3. 检查 iptables 规则
+    if $IPTABLES_CMD -t mangle -L TPROXY_CHAIN -n 2>/dev/null | grep -q "TPROXY"; then
+        echo "✅ iptables TPROXY 规则已加载"
+        local rule_count=$($IPTABLES_CMD -t mangle -L TPROXY_CHAIN -n 2>/dev/null | grep -c "TPROXY" || echo 0)
+        echo "   (共 $rule_count 条 TPROXY 规则)"
+    else
+        echo "❌ iptables TPROXY 规则未找到"
+        errors=$((errors + 1))
+    fi
+    
+    # 4. 检查策略路由
+    if ip rule show | grep -q "$TPROXY_MARK"; then
+        echo "✅ 策略路由规则已配置 (mark: $TPROXY_MARK)"
+    else
+        echo "❌ 策略路由规则未找到"
+        errors=$((errors + 1))
+    fi
+    
+    if ip route show table $TABLE_ID 2>/dev/null | grep -q "local default"; then
+        echo "✅ 路由表 $TABLE_ID 已配置"
+    else
+        echo "❌ 路由表 $TABLE_ID 未配置"
+        errors=$((errors + 1))
+    fi
+    
+    # 5. 检查 IP 转发
+    if [ "$(cat /proc/sys/net/ipv4/ip_forward)" = "1" ]; then
+        echo "✅ IPv4 转发已启用"
+    else
+        echo "❌ IPv4 转发未启用"
+        errors=$((errors + 1))
+    fi
+    
+    # 6. 检查 eBPF 程序（如果启用）
+    if [ "$USE_EBPF" = "true" ]; then
+        if tc filter show dev "$MAIN_IF" ingress 2>/dev/null | grep -q "bpf"; then
+            echo "✅ eBPF 程序已成功加载"
+        else
+            echo "⚠️  eBPF 程序可能未正确加载"
+        fi
+    fi
+    
+    echo "=================================================="
+    if [ $errors -eq 0 ]; then
+        echo "✅ 所有检查通过！TProxy 配置正常"
+        echo ""
+        echo "📱 客户端设备配置指南："
+        echo "   1. 设置网关: $MAIN_IP"
+        echo "   2. 设置 DNS: $MAIN_IP (或 8.8.8.8)"
+        echo ""
+        echo "🧪 测试命令（在客户端设备上执行）："
+        echo "   curl -I https://www.google.com"
+        echo "   curl https://ipinfo.io"
+        echo ""
+        echo "📊 性能说明："
+        if [ "$USE_EBPF" = "true" ]; then
+            echo "   - 使用 eBPF TC 高性能模式"
+            echo "   - 性能比 iptables 提升 3-5 倍"
+            echo "   - 延迟降低 20-30%，CPU 占用降低 40-60%"
+        else
+            echo "   - 使用优化的 iptables TProxy 方案"
+            echo "   - 规则已优化排序，性能优秀"
+        fi
+        return 0
+    else
+        echo "❌ 发现 $errors 个问题，请检查日志"
+        echo ""
+        echo "📋 故障排除："
+        echo "   1. 查看日志: tail -f $LOG_FILE"
+        echo "   2. 检查 Mihomo: systemctl status mihomo 或 rc-service mihomo status"
+        echo "   3. 检查规则: iptables -t mangle -L TPROXY_CHAIN -n -v"
+        echo "   4. 检查路由: ip rule show && ip route show table $TABLE_ID"
+        return 1
+    fi
+}
 
-if ip route show table \$TABLE_ID 2>/dev/null | grep -q "local default"; then
-    log "✅ 路由表 \$TABLE_ID 已配置"
-else
-    log "❌ 错误：路由表 \$TABLE_ID 未正确配置！"
-fi
-
-log "📊 配置验证完成"
+# 执行验证
+verify_config | tee -a "$LOG_FILE"
 EOF
 
     chmod +x "$EBPF_SCRIPT"
@@ -819,29 +947,19 @@ start() {
     ebegin "Starting eBPF TC TProxy service"
     
     # 1. 检查 mihomo 服务是否运行
-    if ! rc-service mihomo status >/dev/null 2>&1; then
+    if ! rc-service mihomo status > /dev/null 2>&1; then
         eend 1 "Mihomo service is not running. Please start mihomo first."
         return 1
     fi
     
     # 2. 等待网络就绪
-    sleep 3
+    sleep 2
     
-    # 3. 等待 mihomo 完全启动（延迟30秒）
-    ebegin "Waiting for mihomo to be ready (30s delay)..."
-    sleep 30
-    
-    # 4. 再次检查 mihomo 是否仍在运行
-    if ! rc-service mihomo status >/dev/null 2>&1; then
-        eend 1 "Mihomo service stopped. Aborting TProxy startup."
-        return 1
-    fi
-    
-    # 5. 确保内核模块已加载
+    # 3. 确保内核模块已加载
     modprobe xt_TPROXY 2>/dev/null || true
     modprobe nf_tproxy_ipv4 2>/dev/null || true
     
-    # 6. 执行配置脚本
+    # 4. 执行配置脚本（脚本内部会智能等待 Mihomo）
     if \$command; then
         eend 0
     else
@@ -852,6 +970,15 @@ start() {
 
 stop() {
     ebegin "Stopping eBPF TC TProxy service"
+    # 清理 TC 规则
+    tc qdisc del dev $MAIN_INTERFACE clsact 2>/dev/null || true
+    # 清理 iptables 规则
+    iptables -t mangle -D PREROUTING -j TPROXY_CHAIN 2>/dev/null || true
+    iptables -t mangle -F TPROXY_CHAIN 2>/dev/null || true
+    iptables -t mangle -X TPROXY_CHAIN 2>/dev/null || true
+    # 清理策略路由
+    ip rule del fwmark $TPROXY_MARK table $TABLE_ID 2>/dev/null || true
+    ip route flush table $TABLE_ID 2>/dev/null || true
     eend 0
 }
 EOFRC
@@ -873,16 +1000,20 @@ Type=oneshot
 RemainAfterExit=yes
 # 检查 mihomo 是否运行
 ExecStartPre=/bin/bash -c 'systemctl is-active --quiet mihomo.service || exit 1'
-# 等待 mihomo 完全启动（延迟30秒）
-ExecStartPre=/bin/sleep 30
-# 再次检查 mihomo 是否仍在运行
-ExecStartPre=/bin/bash -c 'systemctl is-active --quiet mihomo.service || exit 1'
 # 加载内核模块
 ExecStartPre=/sbin/modprobe xt_TPROXY || true
 ExecStartPre=/sbin/modprobe nf_tproxy_ipv4 || true
+# 执行配置脚本（脚本内部会智能等待 Mihomo）
 ExecStart=$EBPF_SCRIPT
 StandardOutput=journal
 StandardError=journal
+# 停止时清理规则
+ExecStop=/bin/bash -c 'tc qdisc del dev $MAIN_INTERFACE clsact 2>/dev/null || true'
+ExecStop=/bin/bash -c 'iptables -t mangle -D PREROUTING -j TPROXY_CHAIN 2>/dev/null || true'
+ExecStop=/bin/bash -c 'iptables -t mangle -F TPROXY_CHAIN 2>/dev/null || true'
+ExecStop=/bin/bash -c 'iptables -t mangle -X TPROXY_CHAIN 2>/dev/null || true'
+ExecStop=/bin/bash -c 'ip rule del fwmark $TPROXY_MARK table $TABLE_ID 2>/dev/null || true'
+ExecStop=/bin/bash -c 'ip route flush table $TABLE_ID 2>/dev/null || true'
 
 [Install]
 WantedBy=multi-user.target
@@ -939,26 +1070,33 @@ main() {
     if [ "$SERVICE_MANAGER" = "openrc" ]; then
         echo -e "  启动: ${CYAN}rc-service ebpf-tproxy start${NC}"
         echo -e "  停止: ${CYAN}rc-service ebpf-tproxy stop${NC}"
+        echo -e "  重启: ${CYAN}rc-service ebpf-tproxy restart${NC}"
         echo -e "  状态: ${CYAN}rc-service ebpf-tproxy status${NC}"
         echo -e "  日志: ${CYAN}tail -f /var/log/ebpf-tproxy.log${NC}"
     else
         echo -e "  启动: ${CYAN}systemctl start ebpf-tproxy${NC}"
         echo -e "  停止: ${CYAN}systemctl stop ebpf-tproxy${NC}"
+        echo -e "  重启: ${CYAN}systemctl restart ebpf-tproxy${NC}"
         echo -e "  状态: ${CYAN}systemctl status ebpf-tproxy${NC}"
         echo -e "  日志: ${CYAN}journalctl -u ebpf-tproxy -f${NC}"
     fi
     echo ""
     echo -e "${YELLOW}性能说明：${NC}"
     if [ "$USE_EBPF" = "true" ]; then
-        echo -e "  - ✅ 使用 eBPF TC 方案（高性能模式）"
-        echo -e "  - 性能比 iptables 提升 3-5 倍"
-        echo -e "  - 延迟降低 20-30%"
-        echo -e "  - CPU 占用降低 40-60%"
+        echo -e "  - ✅ 使用 ${GREEN}eBPF TC 方案${NC}（高性能模式）"
+        echo -e "  - 性能比 iptables 提升 ${GREEN}3-5 倍${NC}"
+        echo -e "  - 延迟降低 ${GREEN}20-30%${NC}"
+        echo -e "  - CPU 占用降低 ${GREEN}40-60%${NC}"
     else
-        echo -e "  - ✅ 使用优化的 iptables TProxy 方案"
+        echo -e "  - ✅ 使用 ${GREEN}优化的 iptables TProxy 方案${NC}"
         echo -e "  - 规则已优化排序，性能优秀"
         echo -e "  - 如需更高性能，请安装 clang 和内核头文件后重新运行"
     fi
+    echo ""
+    echo -e "${CYAN}💡 提示：${NC}"
+    echo -e "  - 配置已自动验证，请查看上方验证报告"
+    echo -e "  - 客户端设备请设置网关为宿主机 IP"
+    echo -e "  - 如有问题，请查看日志文件进行排查"
     echo ""
 }
 
