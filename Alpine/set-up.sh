@@ -1338,6 +1338,13 @@ install_tproxy() {
                 echo -e "${YELLOW}📂 检测到本地脚本，正在执行...${NC}"
                 bash ./setup-ebpf-tc-tproxy.sh
             else
+                # Debian/Ubuntu 编译 eBPF 需要 gcc-multilib
+                if [ "$OS_DIST" = "debian" ]; then
+                    echo -e "${YELLOW}🔧 正在安装 eBPF 编译依赖 (gcc-multilib)...${NC}"
+                    apt-get update -y
+                    apt-get install -y gcc-multilib
+                    echo -e "${GREEN}✅ eBPF 编译依赖安装完成${NC}"
+                fi
                 # 修复 Debian 上 asm/types.h 找不到的问题
                 if [ "$OS_DIST" != "alpine" ] && [ ! -d /usr/include/asm ]; then
                     echo -e "${YELLOW}🔧 正在修复内核头文件链接...${NC}"
