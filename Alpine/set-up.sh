@@ -1665,7 +1665,7 @@ main_menu() {
         echo " 10) 更改主机名 (Hostname)"
         echo " 11) 运行 科技Lion 优化脚本 (kejilion.sh)"
         echo -e " 12) ${YELLOW}系统深度清理 (卸载Docker/清缓存/释内存)${NC}"
-        echo -e " 13) ${RED}一键重装系统 (Debian 13 - 极度危险!)${NC}"
+        echo -e " 13) ${RED}一键重装系统 (Debian 13/Alpine 3.23 - 极度危险!)${NC}"
         echo "--------------------------------------------------"
         echo -e " ${MAGENTA}00) 退出脚本${NC}"
         echo
