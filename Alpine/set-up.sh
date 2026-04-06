@@ -1338,6 +1338,15 @@ install_tproxy() {
                 echo -e "${YELLOW}📂 检测到本地脚本，正在执行...${NC}"
                 bash ./setup-ebpf-tc-tproxy.sh
             else
+                # 修复 Debian 上 asm/types.h 找不到的问题
+                if [ "$OS_DIST" != "alpine" ] && [ ! -d /usr/include/asm ]; then
+                    echo -e "${YELLOW}🔧 正在修复内核头文件链接...${NC}"
+                    if [ -d /usr/include/x86_64-linux-gnu/asm ]; then
+                        ln -sf /usr/include/x86_64-linux-gnu/asm /usr/include/asm
+                    elif [ -d /usr/include/aarch64-linux-gnu/asm ]; then
+                        ln -sf /usr/include/aarch64-linux-gnu/asm /usr/include/asm
+                    fi
+                fi
                 local EBPF_SCRIPT_URL="https://raw.githubusercontent.com/Scu9277/eBPF/refs/heads/main/Alpine/setup-ebpf-tc-tproxy.sh"
                 echo -e "📥 正在下载并执行 eBPF TC TProxy 部署脚本..."
                 if safe_github_script_exec "$EBPF_SCRIPT_URL"; then
@@ -1550,20 +1559,52 @@ install_system_cleanup() {
 install_reinstall_os() {
     echo -e "${RED}==================== 极度危险 ====================${NC}"
     echo -e "${YELLOW}警告：此操作将从网络下载脚本并重装当前操作系统！${NC}"
-    echo -e "${YELLOW}你选择的版本是: ${GREEN}Debian 13${NC}"
     echo -e "${RED}所有数据将被永久删除！${NC}"
     echo -e "${RED}所有数据将被永久删除！${NC}"
     echo -e "${RED}所有数据将被永久删除！${NC}"
     echo -e "=================================================="
+    echo ""
 
+    echo -e "${YELLOW}请选择要重装的系统:${NC}"
+    echo "  1) Debian 13 (推荐，稳定兼容性好)"
+    echo "  2) Alpine 3.23 (轻量，资源占用极低)"
+    echo "  0) 取消操作"
+    echo ""
+    read -p "$(echo -e ${YELLOW}"请输入选项 [1-2 或 0]: "${NC})" os_choice || { echo -e "${GREEN}👍 操作已取消。${NC}"; echo "----------------------------------------------------------------"; return; }
+
+    local reinstall_target=""
+    case "$os_choice" in
+        1)
+            reinstall_target="debian-13"
+            echo -e "${YELLOW}你选择的是: ${GREEN}Debian 13${NC}"
+            echo -e "${YELLOW}特点：软件生态完善、文档丰富、适合大多数场景${NC}"
+            ;;
+        2)
+            reinstall_target="alpine-3.23"
+            echo -e "${YELLOW}你选择的是: ${GREEN}Alpine 3.23${NC}"
+            echo -e "${YELLOW}特点：极致轻量（内存占用 <50MB）、启动快、适合低配 VPS${NC}"
+            ;;
+        0)
+            echo -e "${GREEN}👍 操作已取消。${NC}"
+            echo "----------------------------------------------------------------"
+            return
+            ;;
+        *)
+            echo -e "${RED}❌ 无效选项，操作已取消。${NC}"
+            echo "----------------------------------------------------------------"
+            return
+            ;;
+    esac
+
+    echo -e "=================================================="
     read -p "$(echo -e ${YELLOW}"是否确认重装? (最后警告!) [y/N]: "${NC})" choice || { echo -e "${GREEN}👍 操作已取消。${NC}"; echo "----------------------------------------------------------------"; return; }
 
     case "$choice" in
         y|Y )
             echo -e "${BLUE}🚀 正在开始重装系统... 你的 SSH 将会断开。${NC}"
-            local REINSTALL_URL="https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh"
+            local REINSTALL_URL="https://cnb.cool/bin456789/reinstall/-/git/raw/main/reinstall.sh"
             if safe_github_download "$REINSTALL_URL" "./reinstall.sh"; then
-                bash ./reinstall.sh debian-13
+                bash ./reinstall.sh "$reinstall_target"
             else
                 echo -e "${RED}❌ 重装脚本下载失败！${NC}"
                 echo -e "${RED}--- 如果你还看得到这条消息，说明脚本执行失败。---${NC}"
