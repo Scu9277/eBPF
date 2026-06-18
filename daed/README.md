@@ -3,7 +3,7 @@
 > 在 **Alpine Linux x86_64** 上自动安装 [daed](https://github.com/daeuniverse/daed)（dae 的 Web UI 控制面板）  
 > 自动配置 eBPF 环境检查、OpenRC 自启服务、系统调优和默认代理配置
 
-[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![License](https://img.shields.io/badge/license-MIT-green)](https://raw.githubusercontent.com/Scu9277/eBPF/refs/heads/main/daed/install_daed_alpine.sh)
 
 ---
 
@@ -36,12 +36,17 @@
 
 ## 快速开始
 
-```bash
-# 下载脚本
-curl -fsSL -o install_daed_alpine.sh \
-  https://raw.githubusercontent.com/你的用户名/你的仓库/main/install_daed_alpine.sh
+### 一行命令安装
 
-# 执行安装
+```bash
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/Scu9277/eBPF/refs/heads/main/daed/install_daed_alpine.sh)"
+```
+
+### 或者分步下载执行
+
+```bash
+curl -fsSL -o install_daed_alpine.sh \
+  https://raw.githubusercontent.com/Scu9277/eBPF/refs/heads/main/daed/install_daed_alpine.sh
 bash install_daed_alpine.sh
 ```
 
